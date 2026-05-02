@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vla-project"
+version = "0.1.0"
+description = "VLA pick-and-place on SO-101 (course project)"
+requires-python = ">=3.12"
+
+# Pinned to lerobot v0.5.1 (2026-04-07). Floating versions WILL break this codebase
+# because module paths and policy APIs have moved across v0.4.x → v0.5.x.
+dependencies = [
+    "numpy>=1.26",
+    "pyyaml>=6.0",
+    "pillow>=10.0",
+    "tqdm",
+    "wandb",
+    "matplotlib>=3.8",
+    "lerobot[smolvla] @ git+https://github.com/huggingface/lerobot.git@v0.5.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff", "ipython"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]

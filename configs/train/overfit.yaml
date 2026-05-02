@@ -1,0 +1,50 @@
+# Overfit sanity check: train SmolVLA on a single episode until it
+# memorizes the trajectory. If this fails or loss plateaus high, your
+# training pipeline is broken — STOP and debug before scaling up.
+#
+# Expected outcome: training loss approaches near-zero within a few
+# hundred steps. Then run scripts/run_inference.py with the resulting
+# checkpoint on the real robot from the same start state and verify
+# the policy reproduces the trajectory.
+
+experiment_name: overfit_test_v1
+seed: 42
+
+data:
+  # Point this at a single recorded episode. Use the LeRobot dataset
+  # format. After teleop_record.sh, you may need to filter to one episode
+  # or pass the dataset_id directly.
+  repo_id: null            # set to e.g. "local/my_one_episode" or HF id
+  root: data/raw/test_episode
+  episodes: [0]            # only the first episode
+  image_keys: ["front"]
+
+model:
+  base: lerobot/smolvla_base   # pretrained checkpoint to fine-tune from
+  chunk_size: 50
+  freeze_vision_encoder: false
+  freeze_lm_head: false
+
+train:
+  batch_size: 4              # tiny — we have one episode
+  num_steps: 1000
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  warmup_steps: 50
+  grad_accum_steps: 1
+  log_every: 10
+  save_every: 200
+  output_dir: checkpoints/overfit
+  device: cuda
+  precision: bf16
+
+# Pass criteria the script will check at the end:
+pass_criteria:
+  final_loss_below: 0.05     # if above this, abort and debug
+
+logging:
+  use_wandb: true
+  project: Lerobot
+  entity: saint-yangyuqi-university-of-z-rich
+  mode: online               # online | offline | disabled
+  tags: [overfit, smolvla]
