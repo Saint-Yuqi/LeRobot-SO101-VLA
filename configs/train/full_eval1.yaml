@@ -1,18 +1,21 @@
 # Full training run for Eval 1 (color-conditioned banana → bowl).
-# Run this AFTER overfit.yaml passes.
+# Run this AFTER overfit.yaml passes the trajectory-replay check on the real robot.
 
 experiment_name: eval1_smolvla_v1
 seed: 42
 
 data:
-  repo_id: null
-  root: data/processed/eval1_v1
-  episodes: null               # null = use all episodes
-  image_keys: ["front"]
-  augmentations:
-    color_jitter: 0.2          # robustness to lighting variation in HG
+  # Merged across all 3 recording sessions (19 episodes, 5926 frames).
+  # Re-create with: sbatch scripts/_merge_job.sh OR
+  #   python scripts/merge_datasets.py --src data/raw/eval1_session{1,2,3} --dst data/raw/eval1_merged
+  repo_id: local/eval1_merged
+  root: data/raw/eval1_merged
+  episodes: null               # null = use all 19
+  image_keys: ["main"]
+  augmentations:               # NOT yet wired through (see train.py warning).
+    color_jitter: 0.2
     random_crop_pct: 0.95
-    horizontal_flip: false     # do NOT flip — left/right matters for color order
+    horizontal_flip: false
 
 model:
   base: lerobot/smolvla_base
@@ -21,32 +24,31 @@ model:
   freeze_lm_head: false
 
 train:
-  batch_size: 32
-  grad_accum_steps: 2          # effective batch = 64 on a single A100 80GB
-  num_steps: 30000
+  batch_size: 128
+  grad_accum_steps: 1          # real batch 128 — confirmed fits ~32 GB on A100 80GB
+  num_workers: 4
+  num_steps: 20000
   lr: 5.0e-5
   weight_decay: 1.0e-5
   warmup_steps: 500
   log_every: 50
-  eval_every: 1000             # run validation rollouts on a held-out split
   save_every: 2000
   output_dir: checkpoints/eval1
   device: cuda
   precision: bf16
 
-  # early-stop if validation success rate plateaus
-  early_stop_patience: 5
-
-eval:
-  prompts:
-    - "Put the banana in the blue colored bowl."
-    - "Put the banana in the red colored bowl."
-    - "Put the banana in the green colored bowl."
-  num_rollouts_per_prompt: 3
+# HF Hub push for the final checkpoint. The trainer expands $HF_USER from
+# the environment, so set it in the slurm script (or `export HF_USER=...`
+# before launch). Auth uses ~/.cache/huggingface/token (`hf auth login`, inside the lerobot conda env).
+hf:
+  push: true
+  repo_id: "${HF_USER}/so101-eval1-smolvla-v1"
+  # Public so teammates can `hf download` without a token / collaborator dance.
+  private: false
 
 logging:
   use_wandb: true
   project: Lerobot
   entity: saint-yangyuqi-university-of-z-rich
-  mode: online               # online | offline | disabled
+  mode: online
   tags: [eval1, smolvla]

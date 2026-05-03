@@ -168,11 +168,17 @@ def main():
     mcfg = cfg["model"]
 
     # ---- Dataset metadata (stats, features, fps) ----
-    # `repo_id` is required by LeRobotDatasetMetadata even for purely-local
-    # datasets — when `root` points at an existing local dataset, no Hub
-    # download is attempted, the repo_id is just bookkeeping.
+    # Two modes:
+    #   * Local fixture: `repo_id` is bookkeeping, `root` points at an
+    #     existing on-disk LeRobotDataset (e.g. test_data/).
+    #   * HF Hub: `repo_id` is the real `<user>/<dataset>` and `root` is
+    #     None — lerobot downloads & caches under HF_LEROBOT_HOME (which
+    #     train.slurm pins to $SCRATCH/Lerobot/hf_cache via HF_HOME).
+    # If the dataset is private, the runner must have run
+    # `hf auth login` first (inside the lerobot conda env).
     repo_id = dcfg.get("repo_id") or "local/test_episode"
-    ds_meta = LeRobotDatasetMetadata(repo_id=repo_id, root=dcfg["root"])
+    root = dcfg.get("root")
+    ds_meta = LeRobotDatasetMetadata(repo_id=repo_id, root=root)
 
     # ---- Policy config (must be built BEFORE the dataset, so we can use
     # its delta-indices to pull action chunks).
@@ -189,7 +195,7 @@ def main():
     delta_timestamps = resolve_delta_timestamps(policy_cfg, ds_meta)
     dataset = LeRobotDataset(
         repo_id=repo_id,
-        root=dcfg["root"],
+        root=root,
         episodes=dcfg["episodes"],
         delta_timestamps=delta_timestamps,
     )
@@ -277,7 +283,15 @@ def main():
     threshold = cfg["pass_criteria"]["final_loss_below"]
     passed = last_loss <= threshold
     try:
-        policy.save_pretrained(out_dir / "final")
+        final_dir = out_dir / "final"
+        policy.save_pretrained(final_dir)
+        # Also persist the pre/post processors so downstream loaders (the
+        # lerobot v0.5 migrator, run_inference.py) get the normalization
+        # stats baked in. Without these, state/action go through the
+        # policy un-normalized and you get jittery / nonsense actions on
+        # the real robot — same issue regardless of model dtype.
+        preprocessor.save_pretrained(final_dir)
+        _postprocessor.save_pretrained(final_dir)
 
         # Action-overlay plot: best-effort. A plotting/API issue must not
         # mask the training pass/fail signal — wrap in try/except.
