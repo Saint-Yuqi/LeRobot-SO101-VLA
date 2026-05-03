@@ -93,21 +93,9 @@ python --version       # should print Python 3.12.13
 ```
 
 The repo only contains code. The trained checkpoint is **not** in git
-(too large) — pull it from one of two places:
-
-```bash
-# Option A — directly use the shared cluster path (preferred, no download).
-export CKPT=/shares/feldmann.ics.mnf.uzh/Yuqi/Lerobot/checkpoints/eval1/20260502-174455_job2668259/final
-
-# Option B — once HF upload is fixed, pull from the Hub. Repo is public,
-#   so no `hf auth login` needed. `hf` lives in the `lerobot` conda env.
-conda activate lerobot
-hf download PrajnaYang/so101-eval1-smolvla-v1 \
-    --local-dir checkpoints/eval1/hf_final
-export CKPT=$PWD/checkpoints/eval1/hf_final
-```
-
-Then install and run inference:
+(too large) — `run_inference.py` pulls it for you. `--checkpoint` accepts
+either a local path or a HuggingFace repo id, and auto-downloads the
+latter into the HF cache the first time. No `hf download` step needed.
 
 ```bash
 # 1. Setup (uses the pinned lerobot v0.5.1 in pyproject.toml)
@@ -116,21 +104,38 @@ pip install -e .
 # 2. Dry run — prints actions, no robot connected. Sanity check that the
 #    checkpoint loads and the preprocessor stats are present.
 python scripts/run_inference.py \
-    --checkpoint "$CKPT" \
+    --checkpoint PrajnaYang/so101-eval1-smolvla-v1 \
     --prompt "Put the banana in the blue colored bowl." \
     --max-seconds 5 \
     --dry-run
 
 # 3. Real-robot rollout (20 s budget per the eval brief)
 python scripts/run_inference.py \
-    --checkpoint "$CKPT" \
+    --checkpoint PrajnaYang/so101-eval1-smolvla-v1 \
     --prompt "Put the banana in the blue colored bowl." \
     --max-seconds 20
 ```
 
-If the dry run errors with a missing `policy_preprocessor.json` or
-`*_normalizer_processor.safetensors`, you grabbed an incomplete copy —
-re-pull the whole `final/` directory.
+If you're on the cluster and want to skip even the HF download, point
+at the shared run dir directly:
+
+```bash
+python scripts/run_inference.py \
+    --checkpoint /shares/feldmann.ics.mnf.uzh/Yuqi/Lerobot/checkpoints/eval1/20260502-174455_job2668259/final \
+    --prompt "Put the banana in the blue colored bowl." \
+    --max-seconds 20
+```
+
+Notes:
+- The wrapper now loads `policy_preprocessor.json` + `policy_postprocessor.json`
+  alongside the model weights and applies them in `predict()`. Without these
+  the policy gets un-normalized state/image and the robot's actions are
+  garbage — so if `from_checkpoint` raises about a missing processor file,
+  you got an incomplete copy, repull the whole folder.
+- `--camera-key` defaults to `main` (the eval-1 dataset's image key).
+  Override only if you re-record with a different camera name.
+- HF auto-download caches under `$HF_HOME/hub/` (set to
+  `$SCRATCH/Lerobot/hf_cache` in `train.slurm`).
 
 ## Re-training Eval 1 from scratch
 

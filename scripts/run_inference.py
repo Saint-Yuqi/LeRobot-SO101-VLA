@@ -5,8 +5,16 @@ actions to the robot, repeat. Includes a hard time limit (per the eval
 brief, you have 20 s per rollout).
 
 Usage:
+    # Local checkpoint dir
     python scripts/run_inference.py \\
-        --checkpoint checkpoints/eval1/best \\
+        --checkpoint checkpoints/eval1/<run-id>/final \\
+        --prompt "Put the banana in the blue colored bowl." \\
+        --max-seconds 20
+
+    # HF Hub repo id — auto-downloads all 6 checkpoint files into the
+    # HuggingFace cache the first time, then re-uses the cache.
+    python scripts/run_inference.py \\
+        --checkpoint PrajnaYang/so101-eval1-smolvla-v1 \\
         --prompt "Put the banana in the blue colored bowl." \\
         --max-seconds 20
 
@@ -26,26 +34,68 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
+def resolve_checkpoint(arg: str) -> str:
+    """Accept either a local checkpoint dir or a HF Hub repo id.
+
+    If `arg` is an existing dir with a config.json, use it as-is.
+    Otherwise treat it as `<user>/<repo>` and snapshot_download the whole
+    folder (model.safetensors + the 4 processor files) into the HF cache,
+    then return the local cache path so policy + processors all load
+    from the same on-disk location.
+    """
+    p = Path(arg)
+    if p.is_dir() and (p / "config.json").exists():
+        return str(p)
+    if p.exists():
+        raise SystemExit(
+            f"--checkpoint '{arg}' exists but is not a checkpoint dir "
+            "(missing config.json)."
+        )
+    if "/" not in arg or arg.count("/") > 1:
+        raise SystemExit(
+            f"--checkpoint '{arg}' is neither a local checkpoint dir nor "
+            "a HuggingFace repo id of the form '<user>/<repo>'."
+        )
+
+    print(f"[infer] '{arg}' is not a local path; pulling from HuggingFace Hub...")
+    from huggingface_hub import snapshot_download
+
+    local_path = snapshot_download(repo_id=arg, repo_type="model")
+    print(f"[infer] cached at {local_path}")
+    return local_path
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument(
+        "--checkpoint",
+        required=True,
+        help="Local checkpoint dir OR HuggingFace repo id (e.g. user/repo).",
+    )
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--max-seconds", type=float, default=20.0)
     parser.add_argument("--policy-type", choices=["smolvla", "decoupled"],
                         default="smolvla")
+    parser.add_argument("--camera-key", default="main",
+                        help="Camera name used during teleop recording. "
+                             "Eval 1 dataset uses 'main'.")
     parser.add_argument("--control-hz", type=float, default=30.0)
     parser.add_argument("--dry-run", action="store_true",
                         help="print actions without sending to robot")
     args = parser.parse_args()
 
+    ckpt_path = resolve_checkpoint(args.checkpoint)
+
     # Lazy imports
     from src.models.base_vla import Observation
     if args.policy_type == "smolvla":
         from src.models.smolvla_wrapper import SmolVLAWrapper
-        policy = SmolVLAWrapper.from_checkpoint(args.checkpoint)
+        policy = SmolVLAWrapper.from_checkpoint(
+            ckpt_path, camera_keys=(args.camera_key,)
+        )
     else:
         from src.models.decoupled_policy import DecoupledPolicy
-        policy = DecoupledPolicy.from_checkpoint(args.checkpoint)
+        policy = DecoupledPolicy.from_checkpoint(ckpt_path)
 
     policy = policy.to("cuda").eval()
     policy.reset()
@@ -76,11 +126,11 @@ def main():
         # Read observation
         if robot is not None:
             cam_frames = robot.capture_observation()  # adapt to your robot API
-            images = {"wrist": cam_frames["observation.images.wrist"]}
+            images = {args.camera_key: cam_frames[f"observation.images.{args.camera_key}"]}
             state = cam_frames["observation.state"]
         else:
             # Dry-run synthetic obs for offline testing
-            images = {"wrist": np.zeros((480, 640, 3), dtype=np.uint8)}
+            images = {args.camera_key: np.zeros((480, 640, 3), dtype=np.uint8)}
             state = np.zeros(6, dtype=np.float32)
 
         # Refill action queue if empty

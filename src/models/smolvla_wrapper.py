@@ -25,11 +25,15 @@ class SmolVLAWrapper(BaseVLA):
     def __init__(
         self,
         policy: torch.nn.Module,
+        preprocessor=None,
+        postprocessor=None,
         chunk_size: int = 50,
-        camera_keys: tuple[str, ...] = ("wrist",),
+        camera_keys: tuple[str, ...] = ("main",),
         device: str = "cuda",
     ):
         self._policy = policy
+        self._pre = preprocessor
+        self._post = postprocessor
         self._chunk_size = chunk_size
         self._camera_keys = camera_keys
         self._device = device
@@ -38,16 +42,21 @@ class SmolVLAWrapper(BaseVLA):
     # ----- BaseVLA interface -----
 
     def predict(self, obs: Observation) -> ActionChunk:
-        # If we still have buffered actions from the previous chunk, the
-        # caller (PolicyRunner) is responsible for popping them. Here we
-        # always produce a fresh chunk when called.
+        # Build the raw batch in the same shape train.py feeds the policy,
+        # then run the saved preprocessor (state/image normalization with
+        # the dataset stats baked into the checkpoint). Skipping this is
+        # the bug repair_checkpoint_processors.py warns about.
         batch = self._obs_to_batch(obs)
+        if self._pre is not None:
+            batch = self._pre(batch)
+
         with torch.inference_mode():
-            # NOTE: replace with the actual SmolVLAPolicy method name once
-            # confirmed against the lerobot version we pin. Common options:
-            # `policy.select_action(batch)` returns one action,
-            # `policy.predict_action_chunk(batch)` returns a chunk.
             action_tensor = self._policy.predict_action_chunk(batch)
+
+        # Unnormalize the action chunk back into robot units before sending.
+        if self._post is not None:
+            action_tensor = self._post(action_tensor)
+
         actions = action_tensor.squeeze(0).cpu().numpy().astype(np.float32)
         return ActionChunk(actions=actions, chunk_size=actions.shape[0])
 
@@ -76,9 +85,37 @@ class SmolVLAWrapper(BaseVLA):
         from lerobot.policies.smolvla.modeling_smolvla import (  # type: ignore
             SmolVLAPolicy,
         )
+        from lerobot.processor.pipeline import (  # type: ignore
+            DataProcessorPipeline,
+        )
 
         policy = SmolVLAPolicy.from_pretrained(path)
-        return cls(policy=policy, **kwargs)
+
+        # Load the pre/post-processors saved alongside the model. Without
+        # these, state + image go in un-normalized and actions come out
+        # un-unnormalized — robot jitters / overshoots / does nonsense.
+        try:
+            preprocessor = DataProcessorPipeline.from_pretrained(
+                path, config_filename="policy_preprocessor.json"
+            )
+            postprocessor = DataProcessorPipeline.from_pretrained(
+                path, config_filename="policy_postprocessor.json"
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load preprocessor/postprocessor from {path}. "
+                "The checkpoint must contain policy_preprocessor.json + "
+                "policy_postprocessor.json + their *_processor.safetensors "
+                "stat tensors. For old overfit checkpoints rebuild them "
+                "with scripts/repair_checkpoint_processors.py."
+            ) from e
+
+        return cls(
+            policy=policy,
+            preprocessor=preprocessor,
+            postprocessor=postprocessor,
+            **kwargs,
+        )
 
     # ----- internals -----
 
@@ -93,7 +130,8 @@ class SmolVLAWrapper(BaseVLA):
         batch: dict[str, torch.Tensor] = {}
         for cam in self._camera_keys:
             img = obs.images[cam]  # (H, W, 3) uint8
-            # SmolVLA expects float in [0, 1], (B, C, H, W).
+            # SmolVLA expects float in [0, 1], (B, C, H, W). The saved
+            # preprocessor handles the dataset-stat normalization on top.
             t = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
             batch[f"observation.images.{cam}"] = t.unsqueeze(0).to(self._device)
 
