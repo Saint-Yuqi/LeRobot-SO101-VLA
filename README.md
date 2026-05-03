@@ -12,7 +12,7 @@ instructions, and celebrity image targeting.
 - [x] Inference loop runs on robot from checkpoint
 - [x] Eval 1 dataset collected — 19 episodes / 5 926 frames (3 sessions merged)
 - [x] Eval 1 model trained — 20 000 steps, run `20260502-174455_job2668259`, avg-50 loss ≈ 0.027
-- [ ] Eval 1 checkpoint pushed to HuggingFace Hub (see "Maintainer notes")
+- [ ] Eval 1 checkpoint pushed to HuggingFace Hub
 - [ ] Eval 2 strategy decided (end-to-end vs decoupled)
 - [ ] Eval 3 strategy decided
 - [ ] Final eval rehearsal in HG
@@ -119,35 +119,6 @@ Then launch training via slurm. Output goes under
 ```bash
 export HF_USER=PrajnaYang     # so cfg.hf.repo_id expands correctly
 sbatch scripts/train.slurm configs/train/full_eval1.yaml scripts/train.py
-```
-
-## Maintainer notes — pushing the checkpoint to HuggingFace
-
-The first training run finished cleanly but the final HF upload failed
-with a 401 (expired token). The local checkpoint is intact; the repo on
-the Hub does not yet exist. To finish the upload (only the maintainer
-with the `PrajnaYang` HF account can do this):
-
-```bash
-conda activate lerobot
-hf auth login                                   # paste a WRITE-scope token
-hf repos create PrajnaYang/so101-eval1-smolvla-v1 --type model    # public, one-time
-hf upload PrajnaYang/so101-eval1-smolvla-v1 \
-    checkpoints/eval1/20260502-174455_job2668259/final  .  \
-    --repo-type=model
-```
-
-Note `hf upload` argument order: `<repo> <local_path> <path_in_repo>`.
-The trailing `.` puts the 6 files at the repo root. After this, the
-quickstart commands above work for everyone with no HF login.
-
-To verify a future run finished cleanly:
-
-```bash
-tail -n 30 logs/slurm-<JOBID>.out                # look for "saved final checkpoint"
-ls -lh checkpoints/eval1/<run-id>/final/         # 6 files, ~1.2 GB
-hf download PrajnaYang/so101-eval1-smolvla-v1 \
-    --include "config.json" --local-dir /tmp/hf_check    # 404 → not uploaded yet
 ```
 
 ## Repository layout
