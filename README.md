@@ -19,47 +19,29 @@ instructions, and celebrity image targeting.
 
 ## Quickstart (after `git pull`)
 
-**Environment.** Tested with **Python 3.12.13** inside the cluster's
-`lerobot` conda env. `pyproject.toml` requires `python >= 3.12`. Older
-3.11 envs will fail on lerobot v0.5.1 imports. Always work inside the
-env so `hf`, `lerobot`, and the pinned torch are on `PATH`.
+**Environment.** Requires **Python 3.12+** with lerobot v0.5.1 installed
+(pinned in `pyproject.toml`). Older 3.11 envs will fail on lerobot
+imports. Set up an env however you prefer (conda, uv, venv) and install
+the project:
 
 ```bash
+# example with conda
+conda create -n lerobot python=3.12
 conda activate lerobot
-python --version          # should print Python 3.12.13
-pip install -e .          # one-time
+pip install -e .          # pulls lerobot[smolvla] @ v0.5.1 + the rest
+python --version          # should print Python 3.12.x
 ```
 
-### Where the checkpoint comes from
+### Run inference (downloads the checkpoint from HuggingFace)
 
-The trained checkpoint is **not** in git (too large). `scripts/run_inference.py`'s
-`--checkpoint` flag accepts either:
-
-1. **A local directory** — used as-is, no download.
-2. **A HuggingFace repo id** — auto-downloaded into the HF cache the
-   first time, then re-used from cache.
-
-**On the cluster (recommended):** point at the shared run dir directly.
-Zero download, zero quota usage, everyone reads the same files.
+The trained checkpoint is **not** in git (too large, ~1.2 GB).
+`scripts/run_inference.py` pulls it for you the first time you run —
+just pass the public HuggingFace repo id as `--checkpoint`. Subsequent
+runs hit the local cache.
 
 ```bash
-python scripts/run_inference.py \
-    --checkpoint /shares/feldmann.ics.mnf.uzh/Yuqi/Lerobot/checkpoints/eval1/20260502-174455_job2668259/final \
-    --prompt "Put the banana in the blue colored bowl." \
-    --max-seconds 20
-```
-
-**Off the cluster (or if the shared path is unreachable):** use the HF id.
-
-```bash
-# Optional but strongly recommended on the cluster: redirect the HF
-# cache to your own scratch so the 1.2 GB doesn't land in your home
-# quota. Off-cluster you can skip this — `~/.cache/huggingface/hub/`
-# is fine.
-export HF_HOME=$HOME/scratch/hf_cache
-
-# Dry run (no robot connected) — sanity-check that the checkpoint loads
-# and the policy emits actions.
+# Dry run (no robot connected) — sanity-check that the checkpoint
+# downloads, the policy loads, and actions come out.
 python scripts/run_inference.py \
     --checkpoint PrajnaYang/so101-eval1-smolvla-v1 \
     --prompt "Put the banana in the blue colored bowl." \
@@ -73,10 +55,9 @@ python scripts/run_inference.py \
     --max-seconds 20
 ```
 
-`run_inference.py` prints the resolved cache path on first download
-(`[infer] cached at <path>`), so you can see exactly where the 1.2 GB
-landed. By default that's `$HF_HOME/hub/...` if `HF_HOME` is set,
-otherwise `~/.cache/huggingface/hub/...`.
+The first run prints `[infer] cached at <path>` so you can see exactly
+where the ~1.2 GB landed. By default that's `~/.cache/huggingface/hub/`.
+Set `HF_HOME=<somewhere>` before running if you need it elsewhere.
 
 ### Common flags
 
@@ -96,13 +77,14 @@ otherwise `~/.cache/huggingface/hub/...`.
   folder is missing `policy_preprocessor.json` /
   `policy_postprocessor.json` or their `*_normalizer_processor.safetensors`
   stat tensors. Without them the policy sees un-normalized state +
-  image and the robot does nonsense. Re-pull the whole `final/` folder.
-- **HF download fills up home quota / runs out of disk** — by default
-  `huggingface_hub` caches under `~/.cache/huggingface/hub/`, which
-  shares the home quota. `export HF_HOME=$HOME/scratch/hf_cache`
-  before running, or just use the shared `/shares/...` checkpoint path
-  and skip the download entirely.
-- **`hf` not found** — you're not in the `lerobot` conda env.
+  image and the robot does nonsense. Delete the cache and re-run, or
+  re-pull the whole `final/` folder.
+- **HF download is slow / fills up disk** — the cache lives at
+  `~/.cache/huggingface/hub/` by default. `export HF_HOME=<bigger-disk>`
+  before running to redirect it.
+- **`pip install -e .` fails on `lerobot`** — make sure you're on
+  Python 3.12+ and have `git` available (lerobot is pulled from a
+  GitHub tag, not PyPI).
 
 ## Eval 1 — current trained checkpoint
 
@@ -179,3 +161,16 @@ The brief allows different checkpoints/models per eval. We use:
 - **Eval 3** — TBD with team. Decoupled likely required (small VLA can't recognize OOD celebrities zero-shot).
 
 See `docs/decisions.md` for the full reasoning.
+
+## Cluster shortcut (maintainer only)
+
+When running on the UZH cluster where the training itself happened,
+skip the HuggingFace download and point `--checkpoint` at the shared
+run dir directly — same files, no network, no quota usage:
+
+```bash
+python scripts/run_inference.py \
+    --checkpoint /shares/feldmann.ics.mnf.uzh/Yuqi/Lerobot/checkpoints/eval1/20260502-174455_job2668259/final \
+    --prompt "Put the banana in the blue colored bowl." \
+    --max-seconds 20
+```
