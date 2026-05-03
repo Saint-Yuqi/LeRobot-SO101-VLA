@@ -30,14 +30,36 @@ python --version          # should print Python 3.12.13
 pip install -e .          # one-time
 ```
 
-Run inference. The trained checkpoint is **not** in git (too large):
-`scripts/run_inference.py` pulls it for you. `--checkpoint` accepts
-either a local directory or a HuggingFace repo id, and auto-downloads
-the latter into the HF cache the first time it's used.
+### Where the checkpoint comes from
+
+The trained checkpoint is **not** in git (too large). `scripts/run_inference.py`'s
+`--checkpoint` flag accepts either:
+
+1. **A local directory** — used as-is, no download.
+2. **A HuggingFace repo id** — auto-downloaded into the HF cache the
+   first time, then re-used from cache.
+
+**On the cluster (recommended):** point at the shared run dir directly.
+Zero download, zero quota usage, everyone reads the same files.
 
 ```bash
+python scripts/run_inference.py \
+    --checkpoint /shares/feldmann.ics.mnf.uzh/Yuqi/Lerobot/checkpoints/eval1/20260502-174455_job2668259/final \
+    --prompt "Put the banana in the blue colored bowl." \
+    --max-seconds 20
+```
+
+**Off the cluster (or if the shared path is unreachable):** use the HF id.
+
+```bash
+# Optional but strongly recommended on the cluster: redirect the HF
+# cache to your own scratch so the 1.2 GB doesn't land in your home
+# quota. Off-cluster you can skip this — `~/.cache/huggingface/hub/`
+# is fine.
+export HF_HOME=$HOME/scratch/hf_cache
+
 # Dry run (no robot connected) — sanity-check that the checkpoint loads
-# and the policy emits actions. Useful before plugging in the SO-101.
+# and the policy emits actions.
 python scripts/run_inference.py \
     --checkpoint PrajnaYang/so101-eval1-smolvla-v1 \
     --prompt "Put the banana in the blue colored bowl." \
@@ -51,15 +73,10 @@ python scripts/run_inference.py \
     --max-seconds 20
 ```
 
-On the shared cluster you can skip the HF download entirely by pointing
-at the run dir directly:
-
-```bash
-python scripts/run_inference.py \
-    --checkpoint /shares/feldmann.ics.mnf.uzh/Yuqi/Lerobot/checkpoints/eval1/20260502-174455_job2668259/final \
-    --prompt "Put the banana in the blue colored bowl." \
-    --max-seconds 20
-```
+`run_inference.py` prints the resolved cache path on first download
+(`[infer] cached at <path>`), so you can see exactly where the 1.2 GB
+landed. By default that's `$HF_HOME/hub/...` if `HF_HOME` is set,
+otherwise `~/.cache/huggingface/hub/...`.
 
 ### Common flags
 
@@ -80,9 +97,11 @@ python scripts/run_inference.py \
   `policy_postprocessor.json` or their `*_normalizer_processor.safetensors`
   stat tensors. Without them the policy sees un-normalized state +
   image and the robot does nonsense. Re-pull the whole `final/` folder.
-- **HF download is slow / runs out of disk** — set `HF_HOME` to a path
-  on scratch (this is what `train.slurm` does:
-  `export HF_HOME=/home/yuqyan/scratch/Lerobot/hf_cache`).
+- **HF download fills up home quota / runs out of disk** — by default
+  `huggingface_hub` caches under `~/.cache/huggingface/hub/`, which
+  shares the home quota. `export HF_HOME=$HOME/scratch/hf_cache`
+  before running, or just use the shared `/shares/...` checkpoint path
+  and skip the download entirely.
 - **`hf` not found** — you're not in the `lerobot` conda env.
 
 ## Eval 1 — current trained checkpoint
