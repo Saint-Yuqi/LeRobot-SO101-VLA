@@ -81,7 +81,7 @@ def main():
 
     # Lazy imports so argparse stays fast.
     import torch
-    from torch.utils.data import DataLoader
+    from torch.utils.data import ConcatDataset, DataLoader
 
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
     from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
@@ -90,6 +90,9 @@ def main():
     from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
 
     torch.manual_seed(cfg["seed"])
+    # TF32 matmul: ~3-5% free on A100 fp32 paths (bf16 already main path).
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision("high")
 
     dcfg = cfg["data"]
     tcfg = cfg["train"]
@@ -103,9 +106,15 @@ def main():
             "preprocessor. Train still runs without them."
         )
 
-    # ---- Dataset metadata ----
-    repo_id = dcfg.get("repo_id") or "local/eval1_merged"
-    root = dcfg.get("root")
+    # `data.sources` is an optional list of per-source dicts (each accepts the
+    # same keys — repo_id, root, episodes, val — that the top-level dcfg does).
+    # When present, datasets are concatenated for training; the FIRST source's
+    # LeRobotDatasetMetadata is used for the normalizer stats. Action/state
+    # shapes must match across sources (verified at runtime by lerobot).
+    sources = dcfg.get("sources")
+    primary = sources[0] if sources else dcfg
+    repo_id = primary.get("repo_id") or "local/eval1_merged"
+    root = primary.get("root")
     ds_meta = LeRobotDatasetMetadata(repo_id=repo_id, root=root)
 
     # ---- Policy config ----
@@ -119,13 +128,74 @@ def main():
 
     # ---- Dataset ----
     delta_timestamps = resolve_delta_timestamps(policy_cfg, ds_meta)
-    dataset = LeRobotDataset(
-        repo_id=repo_id,
-        root=root,
-        episodes=dcfg.get("episodes"),  # null = all
-        delta_timestamps=delta_timestamps,
-    )
-    print(f"[train] dataset frames: {len(dataset)}  episodes: {ds_meta.total_episodes}")
+    seed = int(cfg.get("seed", 42))
+
+    def _build_one(src: dict) -> tuple[torch.utils.data.Dataset, torch.utils.data.Dataset | None]:
+        """Build a (train, val_or_None) pair for one source. The val split is opt-in
+        per source via `val` (color-stratified by tasks.parquet). Skipped when the
+        source pins `episodes` (single-episode debug or carry-over subsets).
+
+        Optional `prompt_augment` field on a source enables per-sample prompt
+        rewriting (direct/ordinal/relational/negation) using the bowl arrangement
+        for that episode. Val datasets are NOT augmented — eval loss should track
+        the canonical prompt distribution to be comparable across runs."""
+        s_repo = src.get("repo_id") or "local/eval1_merged"
+        s_root = src.get("root")
+        s_val_cfg = (src.get("val") or {}) if src.get("episodes") is None else {}
+        train_eps = src.get("episodes")
+        val_eps = None
+        if s_val_cfg:
+            from src.data.splits import episodes_by_color, train_val_episode_split
+            by = episodes_by_color(s_repo, s_root)
+            train_eps, val_eps = train_val_episode_split(
+                by,
+                per_color=s_val_cfg.get("per_color"),
+                fraction=s_val_cfg.get("fraction"),
+                min_train_per_color=int(s_val_cfg.get("min_train_per_color", 3)),
+                seed=seed,
+            )
+            print(f"[train] {s_repo}: train_eps={len(train_eps)} val_eps={len(val_eps)} -> {val_eps}")
+        train_ds: torch.utils.data.Dataset = LeRobotDataset(
+            repo_id=s_repo, root=s_root, episodes=train_eps, delta_timestamps=delta_timestamps,
+        )
+        val_ds: torch.utils.data.Dataset | None = None
+        if val_eps:
+            val_ds = LeRobotDataset(
+                repo_id=s_repo, root=s_root, episodes=val_eps, delta_timestamps=delta_timestamps,
+            )
+
+        aug = src.get("prompt_augment")
+        if aug:
+            from src.data.prompt_aug import PromptAugmentingDataset, load_arrangements
+            arr_path = aug.get("arrangements")
+            if not arr_path:
+                raise ValueError(f"{s_repo}: prompt_augment requires `arrangements` path")
+            arrs = load_arrangements(arr_path, s_repo)
+            if not arrs:
+                raise ValueError(f"{s_repo}: no arrangement entries found in {arr_path}")
+            train_ds = PromptAugmentingDataset(train_ds, arrs, seed=seed)
+            print(f"[train] {s_repo}: prompt_augment ON ({len(arrs)} episodes mapped)")
+        return train_ds, val_ds
+
+    if sources:
+        train_parts: list[LeRobotDataset] = []
+        val_parts: list[LeRobotDataset] = []
+        for src in sources:
+            td, vd = _build_one(src)
+            train_parts.append(td)
+            if vd is not None:
+                val_parts.append(vd)
+        dataset = train_parts[0] if len(train_parts) == 1 else ConcatDataset(train_parts)
+        val_dataset = (
+            None if not val_parts else (val_parts[0] if len(val_parts) == 1 else ConcatDataset(val_parts))
+        )
+        print(
+            f"[train] multi-source: {len(sources)} sources  "
+            f"train_frames={len(dataset)}  val_frames={len(val_dataset) if val_dataset else 0}"
+        )
+    else:
+        dataset, val_dataset = _build_one(dcfg)
+        print(f"[train] dataset frames: {len(dataset)}  episodes: {ds_meta.total_episodes}")
 
     loader = DataLoader(
         dataset,
@@ -137,10 +207,33 @@ def main():
         persistent_workers=tcfg.get("num_workers", 4) > 0,
     )
 
+    val_loader = None
+    if val_dataset is not None:
+        # Cap val workers — a few are plenty for a small set, leaves CPUs for train.
+        val_workers = min(2, int(tcfg.get("num_workers", 4)))
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=tcfg["batch_size"],
+            shuffle=False,
+            num_workers=val_workers,
+            drop_last=False,
+            pin_memory=True,
+            persistent_workers=val_workers > 0,
+        )
+        print(f"[train] val frames: {len(val_dataset)}  batches: {len(val_loader)}")
+
     # ---- Policy + processors ----
     policy = make_policy(cfg=policy_cfg, ds_meta=ds_meta)
     policy.train()
     print(f"[train] params: {sum(p.numel() for p in policy.parameters()):,}")
+
+    # Optional torch.compile. Bench (job 2701026) shows +9% samples/s and
+    # -20% VRAM at the cost of ~5 min cold-start; SmolVLA's flow-matching
+    # forward has graph breaks (Beta sample, .item() in loss path) so we use
+    # default mode rather than reduce-overhead — same gain, no graph drama.
+    if tcfg.get("compile", False):
+        print("[train] torch.compile enabled (mode=default) — first step will be slow")
+        policy = torch.compile(policy)
 
     preprocessor, postprocessor = make_pre_post_processors(
         policy_cfg=policy_cfg,
@@ -168,6 +261,7 @@ def main():
         policy.parameters(),
         lr=tcfg["lr"],
         weight_decay=tcfg["weight_decay"],
+        fused=torch.cuda.is_available(),
     )
     warmup = int(tcfg.get("warmup_steps", 0))
     total_steps = int(tcfg["num_steps"])
@@ -183,6 +277,24 @@ def main():
     sched = torch.optim.lr_scheduler.LambdaLR(optim, lr_lambda=lr_lambda)
 
     grad_accum = int(tcfg.get("grad_accum_steps", 1))
+
+    # ---- GPU sampler (for per-step system/* metrics in wandb) ----
+    from src.utils.gpu_metrics import GpuSampler
+    gpu_sampler = GpuSampler()  # gracefully no-ops on non-CUDA / no-driver hosts
+
+    def run_eval() -> float | None:
+        """Full no-grad pass over val set; returns mean loss or None if no val set."""
+        if val_loader is None:
+            return None
+        policy.eval()
+        losses: list[float] = []
+        with torch.no_grad():
+            for vbatch in val_loader:
+                vbatch = preprocessor(vbatch)
+                vloss, _ = policy.forward(vbatch)
+                losses.append(float(vloss.detach().cpu()))
+        policy.train()
+        return sum(losses) / max(1, len(losses))
 
     # ---- Loop ----
     step = 0
@@ -212,6 +324,7 @@ def main():
                 lr = optim.param_groups[0]["lr"]
                 elapsed = time.time() - t0
                 steps_per_s = (step + 1) / max(elapsed, 1e-6)
+                samples_per_s = steps_per_s * tcfg["batch_size"]
                 eta_min = (total_steps - step) / max(steps_per_s, 1e-6) / 60
                 print(
                     f"[train] step={step:6d}/{total_steps}  "
@@ -219,20 +332,25 @@ def main():
                     f"lr={lr:.2e}  {steps_per_s:.2f} steps/s  ETA={eta_min:.1f}min"
                 )
                 if use_wandb:
-                    wandb.log(
-                        {
-                            "train/loss": last_loss,
-                            "train/loss_avg50": avg,
-                            "train/lr": lr,
-                            "train/steps_per_s": steps_per_s,
-                        },
-                        step=step,
-                    )
+                    payload = {
+                        "train/loss": last_loss,
+                        "train/loss_avg50": avg,
+                        "train/lr": lr,
+                        "train/steps_per_s": steps_per_s,
+                        "train/samples_per_s": samples_per_s,
+                    }
+                    payload.update(gpu_sampler.sample())
+                    wandb.log(payload, step=step)
             if step > 0 and step % tcfg["save_every"] == 0:
                 ckpt_dir = out_dir / f"step_{step}"
                 policy.save_pretrained(ckpt_dir)
                 preprocessor.save_pretrained(ckpt_dir)
                 postprocessor.save_pretrained(ckpt_dir)
+                val_loss = run_eval()
+                if val_loss is not None:
+                    print(f"[train] step={step:6d}  eval/loss={val_loss:.4f}")
+                    if use_wandb:
+                        wandb.log({"eval/loss": val_loss}, step=step)
 
             step += 1
             if step >= total_steps:
@@ -246,11 +364,19 @@ def main():
         postprocessor.save_pretrained(final_dir)
         print(f"[train] saved final checkpoint -> {final_dir}")
 
+        final_val = run_eval()
+        if final_val is not None:
+            print(f"[train] final eval/loss={final_val:.4f}")
+            if use_wandb:
+                wandb.log({"eval/loss": final_val}, step=max(0, step - 1))
+                wandb.summary["final_eval_loss"] = final_val
+
         if use_wandb:
             avg = sum(loss_window) / max(1, len(loss_window))
             wandb.summary["final_loss"] = last_loss
             wandb.summary["final_loss_avg50"] = avg
     finally:
+        gpu_sampler.shutdown()
         if use_wandb and wandb_run is not None:
             wandb.finish()
 

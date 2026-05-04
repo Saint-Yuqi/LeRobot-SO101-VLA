@@ -1,0 +1,54 @@
+# Eval-1 fine-tune on the full task1 recording (90 episodes, fixed
+# blue–red–green left→right arrangement, direct-color prompts).
+# Differs from full_eval1.yaml only in data source + experiment name + HF push target;
+# trainer code path is identical.
+
+experiment_name: eval1_smolvla_v2
+seed: 42
+
+data:
+  # 90 episodes (30 per color), pulled from HuggingFace on first use.
+  # Auto-cached under HF_HOME (or ~/.cache/huggingface/lerobot if unset).
+  repo_id: ethrl2026/so101_pickup_20260503_153511_task1
+  root: null
+  episodes: null               # null = let the val splitter use all episodes
+  image_keys: ["main"]
+  val:
+    fraction: 0.1              # ≈3 val eps per color, 27 train
+    min_train_per_color: 3
+  augmentations:               # NOT yet wired through (see train.py warning).
+    color_jitter: 0.2
+    random_crop_pct: 0.95
+    horizontal_flip: false
+
+model:
+  base: lerobot/smolvla_base
+  chunk_size: 50
+  freeze_vision_encoder: false
+  freeze_lm_head: false
+
+train:
+  batch_size: 128
+  grad_accum_steps: 1
+  num_workers: 4
+  num_steps: 20000
+  lr: 5.0e-5
+  weight_decay: 1.0e-5
+  warmup_steps: 500
+  log_every: 50
+  save_every: 2000
+  output_dir: checkpoints/eval1_v2
+  device: cuda
+  precision: bf16
+
+hf:
+  push: true
+  repo_id: "${HF_USER}/so101-eval1-smolvla-v2"
+  private: false
+
+logging:
+  use_wandb: true
+  project: Lerobot
+  entity: saint-yangyuqi-university-of-z-rich
+  mode: online
+  tags: [eval1, smolvla, task1-full]
