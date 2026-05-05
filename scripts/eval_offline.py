@@ -588,10 +588,18 @@ def main():
     report["elapsed_s_total"] = time.time() - t0
 
     # ---- Pass / fail verdict ----
+    # MAE thresholds are RELATIVE to each joint's action range so the same
+    # criterion works in normalized space (range≈[-1,1]) and in raw degrees
+    # (SO-101 ranges 70–185°). 10% of range is the cutoff for replay (Test A,
+    # full chunk prediction is harder), 5% for the closed-loop overlay
+    # (Test D, only chunk[0] each step — easier).
     print("\n=== Verdict ===")
-    a_ok = (report["test_a"].get("n_nan", 0) == 0 and
-            np.mean(report["test_a"]["per_joint_mae_mean"]) < 0.10)
-    print(f"  Test A (replay)       : {'PASS' if a_ok else 'FAIL'}")
+    joint_range = np.maximum(action_hi - action_lo, 1e-6)
+    a_pj_mae = np.asarray(report["test_a"]["per_joint_mae_mean"])
+    a_rel = float(np.mean(a_pj_mae / joint_range))
+    a_ok = report["test_a"].get("n_nan", 0) == 0 and a_rel < 0.10
+    print(f"  Test A (replay)       : {'PASS' if a_ok else 'FAIL'}  "
+          f"(mean MAE / range = {a_rel*100:.2f}%)")
     if "test_b" in report:
         b = report["test_b"]
         ratio = b.get("ratio_within_over_between") or 0.0
@@ -605,9 +613,12 @@ def main():
         per_ep = report["test_d"]["per_episode"]
         if per_ep:
             mean_overall_mae = float(np.mean([p["overall_mae"] for p in per_ep]))
-            d_ok = mean_overall_mae < 0.10
+            mean_joint_range = float(np.mean(joint_range))
+            d_rel = mean_overall_mae / max(mean_joint_range, 1e-6)
+            d_ok = d_rel < 0.05
             print(f"  Test D (overlay)      : {'PASS' if d_ok else 'FAIL'}  "
-                  f"(mean overall MAE={mean_overall_mae:.4f}, "
+                  f"(mean MAE={mean_overall_mae:.3f}°, "
+                  f"= {d_rel*100:.2f}% of range, "
                   f"PNGs in {Path(args.overlay_dir).resolve()})")
         else:
             print(f"  Test D (overlay)      : SKIP (no episodes overlaid)")

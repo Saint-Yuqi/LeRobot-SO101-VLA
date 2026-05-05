@@ -54,8 +54,11 @@ class SmolVLAWrapper(BaseVLA):
             action_tensor = self._policy.predict_action_chunk(batch)
 
         # Unnormalize the action chunk back into robot units before sending.
+        # `self._post` is a DataProcessorPipeline whose `to_transition()` step
+        # expects a batch dict, not a bare Tensor — wrap then unwrap.
         if self._post is not None:
-            action_tensor = self._post(action_tensor)
+            post_batch = self._post({"action": action_tensor})
+            action_tensor = post_batch["action"]
 
         actions = action_tensor.squeeze(0).cpu().numpy().astype(np.float32)
         return ActionChunk(actions=actions, chunk_size=actions.shape[0])
