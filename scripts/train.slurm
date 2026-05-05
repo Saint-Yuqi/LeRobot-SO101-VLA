@@ -40,6 +40,13 @@ export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 export HF_HOME=/home/yuqyan/scratch/Lerobot/hf_cache
 export PIP_CACHE_DIR=/home/yuqyan/scratch/Lerobot/pip_cache
 
+# huggingface_hub looks for the token at $HF_HOME/token. We override HF_HOME to
+# scratch but `hf auth login` writes to ~/.cache/huggingface/token, so without
+# this fallback every dataset fetch from a private repo 401s on compute nodes.
+if [ -z "${HF_TOKEN:-}" ] && [ -s "$HOME/.cache/huggingface/token" ]; then
+    export HF_TOKEN="$(cat "$HOME/.cache/huggingface/token")"
+fi
+
 mkdir -p logs
 
 echo "=== job $SLURM_JOB_ID  config=$CONFIG  script=$SCRIPT  host=$(hostname)  gpu=$CUDA_VISIBLE_DEVICES ==="
