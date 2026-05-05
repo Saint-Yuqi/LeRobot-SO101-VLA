@@ -18,6 +18,7 @@ Or via slurm:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -155,13 +156,24 @@ def main():
                 seed=seed,
             )
             print(f"[train] {s_repo}: train_eps={len(train_eps)} val_eps={len(val_eps)} -> {val_eps}")
+        # `force_cache_sync=True` works around a lerobot v0.5.1 bug: when a
+        # second LeRobotDataset is built against the same repo with a
+        # different `episodes` slice (here: train_ds first, then val_ds),
+        # `try_load()` finds the train parquets already on disk, applies the
+        # val episode-index filter, gets zero rows, and raises
+        # `ValueError("Instruction 'train' corresponds to no data!")` — which
+        # `try_load`'s except clause does NOT catch (only FileNotFoundError /
+        # NotADirectoryError). Forcing a cache sync skips that broken path
+        # and goes straight to selective hub fetch, which is idempotent.
         train_ds: torch.utils.data.Dataset = LeRobotDataset(
-            repo_id=s_repo, root=s_root, episodes=train_eps, delta_timestamps=delta_timestamps,
+            repo_id=s_repo, root=s_root, episodes=train_eps,
+            delta_timestamps=delta_timestamps, force_cache_sync=True,
         )
         val_ds: torch.utils.data.Dataset | None = None
         if val_eps:
             val_ds = LeRobotDataset(
-                repo_id=s_repo, root=s_root, episodes=val_eps, delta_timestamps=delta_timestamps,
+                repo_id=s_repo, root=s_root, episodes=val_eps,
+                delta_timestamps=delta_timestamps, force_cache_sync=True,
             )
 
         aug = src.get("prompt_augment")
@@ -296,14 +308,33 @@ def main():
         policy.train()
         return sum(losses) / max(1, len(losses))
 
+    # ---- Early-stop config (opt-in via cfg.train.early_stop) ----
+    # Conservative defaults: only fires after `min_steps` AND only when val
+    # has plateaued or risen for `patience` consecutive eval cycles. The
+    # best-so-far checkpoint is always saved separately to `<out>/best/`
+    # alongside `step_N/` periodic saves so we never lose the lowest-val
+    # checkpoint to overfit drift.
+    es_cfg = tcfg.get("early_stop") or {}
+    es_enabled = bool(es_cfg.get("enabled", False))
+    es_patience = int(es_cfg.get("patience", 4))
+    es_min_delta = float(es_cfg.get("min_delta", 0.005))
+    es_min_steps = int(es_cfg.get("min_steps", 5000))
+    if es_enabled:
+        print(f"[train] early-stop: enabled  patience={es_patience}  "
+              f"min_delta={es_min_delta}  min_steps={es_min_steps}")
+    best_val_loss = float("inf")
+    best_step = -1
+    no_improve_evals = 0
+
     # ---- Loop ----
     step = 0
     last_loss = float("inf")
     loss_window: list[float] = []
     t0 = time.time()
     optim.zero_grad()
+    should_stop = False
 
-    while step < total_steps:
+    while step < total_steps and not should_stop:
         for batch in loader:
             batch = preprocessor(batch)
             loss, _ = policy.forward(batch)
@@ -351,9 +382,43 @@ def main():
                     print(f"[train] step={step:6d}  eval/loss={val_loss:.4f}")
                     if use_wandb:
                         wandb.log({"eval/loss": val_loss}, step=step)
+                    # Track best + early-stop bookkeeping
+                    if val_loss < best_val_loss - es_min_delta:
+                        best_val_loss = val_loss
+                        best_step = step
+                        no_improve_evals = 0
+                        best_dir = out_dir / "best"
+                        policy.save_pretrained(best_dir)
+                        preprocessor.save_pretrained(best_dir)
+                        postprocessor.save_pretrained(best_dir)
+                        # Stamp metadata so downstream knows what's inside `best/`.
+                        (best_dir / "best_val_meta.json").write_text(
+                            json.dumps({"val_loss": float(val_loss),
+                                        "step": int(step),
+                                        "experiment": cfg["experiment_name"]}, indent=2)
+                        )
+                        print(f"[train] new best  val_loss={val_loss:.4f} @ step {step} -> {best_dir}")
+                        if use_wandb:
+                            wandb.log({"eval/best_loss": val_loss,
+                                       "eval/best_step": step}, step=step)
+                    else:
+                        no_improve_evals += 1
+                        print(f"[train] no-improve evals: {no_improve_evals}/"
+                              f"{es_patience} (best={best_val_loss:.4f} @ {best_step})")
+                    if (es_enabled and no_improve_evals >= es_patience
+                            and step >= es_min_steps):
+                        print(f"[train] EARLY STOP at step {step}: "
+                              f"{no_improve_evals} consecutive evals without "
+                              f"≥{es_min_delta} improvement. "
+                              f"Best val_loss={best_val_loss:.4f} @ step {best_step}.")
+                        if use_wandb:
+                            wandb.summary["early_stop_step"] = step
+                            wandb.summary["early_stop_best_step"] = best_step
+                            wandb.summary["early_stop_best_loss"] = best_val_loss
+                        should_stop = True
 
             step += 1
-            if step >= total_steps:
+            if step >= total_steps or should_stop:
                 break
 
     # ---- Final save ----

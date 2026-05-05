@@ -54,6 +54,14 @@ train:
   output_dir: checkpoints/eval2_v1
   device: cuda
   precision: bf16
+  # Early stopping. Same semantics as eval1; eval2's val is task2 only
+  # (canonical prompt, no augmentation), so val/loss tracks how well the
+  # model fits direct color prompts on the 5 alternative arrangements.
+  early_stop:
+    enabled: true
+    patience: 4              # 4×save_every=10000 step plateau before stopping
+    min_delta: 0.005
+    min_steps: 5000
 
 hf:
   push: true

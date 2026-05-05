@@ -36,18 +36,24 @@ def _classify_tasks(tasks) -> str:
     return "other"
 
 
-def episodes_by_color(repo_id: str, root: str | Path) -> dict[str, list[int]]:
+def episodes_by_color(repo_id: str, root: str | Path | None) -> dict[str, list[int]]:
     """Group episode indices by which color word appears in their task prompt.
 
     Args:
-        repo_id: unused at runtime — kept in the signature to match how the
-            trainer already calls into lerobot. Logged for traceability.
+        repo_id: HF dataset id (e.g. "ethrl2026/so101_..."). Used to resolve
+            the local cache path when `root` is None.
         root: dataset root containing `meta/episodes/chunk-*/file-*.parquet`.
+            If None (HF auto-download), `LeRobotDatasetMetadata` is used to
+            locate the cache dir. The dataset must already be downloaded —
+            this function only reads parquet, never fetches.
 
     Returns:
         Dict like `{"blue": [0,3,...], "red": [...], "green": [...], "other": [...]}`.
         Empty buckets are *omitted* so callers can iterate without filtering.
     """
+    if root is None:
+        from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
+        root = LeRobotDatasetMetadata(repo_id=repo_id).root
     root = Path(root)
     files = sorted(glob.glob(str(root / "meta/episodes/chunk-*/file-*.parquet")))
     if not files:

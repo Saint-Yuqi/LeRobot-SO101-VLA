@@ -40,6 +40,14 @@ train:
   output_dir: checkpoints/eval1_v2
   device: cuda
   precision: bf16
+  # Early stopping. Conservative — requires `patience` consecutive eval cycles
+  # WITHOUT improvement of at least `min_delta`, AND step >= min_steps. The
+  # lowest-val checkpoint is always saved to `<output_dir>/<run>/best/`.
+  early_stop:
+    enabled: true
+    patience: 4              # 4×save_every=8000 step plateau before stopping
+    min_delta: 0.005         # ~3% of typical val/loss; below this is noise
+    min_steps: 5000          # don't fire during early/transient phase
 
 hf:
   push: true
