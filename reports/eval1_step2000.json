@@ -1,0 +1,119 @@
+{
+  "checkpoint": "checkpoints/eval1_v2/20260505-133228_job2715336/step_2000",
+  "dataset": "ethrl2026/so101_pickup_20260503_153511_task1",
+  "episodes": [
+    10,
+    14,
+    19,
+    43,
+    44,
+    54,
+    74,
+    75,
+    83
+  ],
+  "frames_per_episode": 4,
+  "n_samples": 36,
+  "elapsed_s_load": 439.6475944519043,
+  "test_a": {
+    "n_samples": 36,
+    "n_nan": 0,
+    "n_out_of_training_range": 2,
+    "per_joint_mae_mean": [
+      3.8027501106262207,
+      9.194123268127441,
+      13.396594047546387,
+      16.521509170532227,
+      6.34916877746582,
+      4.997471809387207
+    ],
+    "per_joint_mae_max": [
+      14.091130256652832,
+      39.88114547729492,
+      53.60391616821289,
+      82.84339141845703,
+      21.874710083007812,
+      39.53867721557617
+    ],
+    "chunk_rms": {
+      "n": 36,
+      "mean": 12.502286260977911,
+      "std": 9.322903623277204,
+      "min": 3.9127660100804458,
+      "max": 44.05547626474755,
+      "median": 8.787438745009565
+    }
+  },
+  "test_c": {
+    "n_trials": 144,
+    "n_nan": 0,
+    "n_out_of_range": 0,
+    "max_normalized_deviation": {
+      "n": 144,
+      "mean": 0.4864240479138162,
+      "std": 0.035735445923224356,
+      "min": 0.3242477774620056,
+      "max": 0.5654036402702332,
+      "median": 0.4916692078113556
+    },
+    "ood_prompts": [
+      "Put the banana in the purple colored bowl.",
+      "What is the meaning of life?",
+      "",
+      "asdf qwerty zxcv banana bowl table"
+    ]
+  },
+  "test_d": {
+    "n_episodes": 3,
+    "overlay_pngs": [
+      "reports/eval1_step2000_overlay/action_overlay_ep010.png",
+      "reports/eval1_step2000_overlay/action_overlay_ep043.png",
+      "reports/eval1_step2000_overlay/action_overlay_ep074.png"
+    ],
+    "per_episode": [
+      {
+        "episode": 10,
+        "n_frames": 409,
+        "prompt": "Put the banana in the blue colored bowl.",
+        "per_joint_mae": [
+          1.0716139078140259,
+          1.9605441093444824,
+          2.605276346206665,
+          2.9061005115509033,
+          1.6648259162902832,
+          2.2432801723480225
+        ],
+        "overall_mae": 2.0752735137939453
+      },
+      {
+        "episode": 43,
+        "n_frames": 376,
+        "prompt": "Put the banana in the red colored bowl.",
+        "per_joint_mae": [
+          1.0819321870803833,
+          3.324162483215332,
+          4.50717830657959,
+          4.661745548248291,
+          1.150383710861206,
+          1.9269760847091675
+        ],
+        "overall_mae": 2.7753963470458984
+      },
+      {
+        "episode": 74,
+        "n_frames": 418,
+        "prompt": "Put the banana in the green colored bowl.",
+        "per_joint_mae": [
+          1.1901875734329224,
+          2.854811906814575,
+          3.61028790473938,
+          4.515162944793701,
+          1.764538049697876,
+          2.6215250492095947
+        ],
+        "overall_mae": 2.7594187259674072
+      }
+    ]
+  },
+  "elapsed_s_total": 707.3316214084625
+}

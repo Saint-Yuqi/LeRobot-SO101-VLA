@@ -294,6 +294,11 @@ def main():
     from src.utils.gpu_metrics import GpuSampler
     gpu_sampler = GpuSampler()  # gracefully no-ops on non-CUDA / no-driver hosts
 
+    # ---- Sidecar metadata helper (for rollout-side wandb linkage) ----
+    from src.utils.checkpoint_meta import write_checkpoint_meta
+    from src.utils.run_metadata import git_sha as _git_sha_helper
+    _git_sha_str = _git_sha_helper()
+
     def run_eval() -> float | None:
         """Full no-grad pass over val set; returns mean loss or None if no val set."""
         if val_loader is None:
@@ -377,6 +382,9 @@ def main():
                 policy.save_pretrained(ckpt_dir)
                 preprocessor.save_pretrained(ckpt_dir)
                 postprocessor.save_pretrained(ckpt_dir)
+                write_checkpoint_meta(
+                    ckpt_dir, wandb_run, cfg, step, _git_sha_str,
+                )
                 val_loss = run_eval()
                 if val_loss is not None:
                     print(f"[train] step={step:6d}  eval/loss={val_loss:.4f}")
@@ -392,10 +400,15 @@ def main():
                         preprocessor.save_pretrained(best_dir)
                         postprocessor.save_pretrained(best_dir)
                         # Stamp metadata so downstream knows what's inside `best/`.
+                        # Kept for backwards-compat; superseded by wandb_metadata.json.
                         (best_dir / "best_val_meta.json").write_text(
                             json.dumps({"val_loss": float(val_loss),
                                         "step": int(step),
                                         "experiment": cfg["experiment_name"]}, indent=2)
+                        )
+                        write_checkpoint_meta(
+                            best_dir, wandb_run, cfg, step, _git_sha_str,
+                            extra={"val_loss": float(val_loss), "is_best": True},
                         )
                         print(f"[train] new best  val_loss={val_loss:.4f} @ step {step} -> {best_dir}")
                         if use_wandb:
@@ -427,6 +440,10 @@ def main():
         policy.save_pretrained(final_dir)
         preprocessor.save_pretrained(final_dir)
         postprocessor.save_pretrained(final_dir)
+        write_checkpoint_meta(
+            final_dir, wandb_run, cfg, max(0, step - 1), _git_sha_str,
+            extra={"is_final": True},
+        )
         print(f"[train] saved final checkpoint -> {final_dir}")
 
         final_val = run_eval()

@@ -1,0 +1,53 @@
+# Benchmark config used by scripts/benchmark_batch.py.
+# Mirrors full_eval1.yaml but trims to a short measurement window and
+# disables HF push / wandb-online by default. CLI flags can override
+# batch_size, compile, and freeze_vision_encoder for the sweep stages.
+
+experiment_name: bench
+seed: 42
+
+data:
+  repo_id: local/eval1_merged
+  root: data/raw/eval1_merged
+  episodes: null
+  image_keys: ["main"]
+  # No val split needed for throughput benchmarking; explicit empty so the
+  # trainer code path that builds a val loader is skipped.
+  val: null
+
+model:
+  base: lerobot/smolvla_base
+  chunk_size: 50
+  freeze_vision_encoder: false   # CLI override: --freeze-ve / --no-freeze-ve
+  freeze_lm_head: false
+
+train:
+  batch_size: 128                # CLI override: --batch-size N
+  grad_accum_steps: 1
+  num_workers: 4
+  num_steps: 200                 # CLI override: --num-steps
+  warmup_steps: 0
+  lr: 5.0e-5
+  weight_decay: 1.0e-5
+  log_every: 10
+  save_every: 1000000            # effectively never
+  output_dir: checkpoints/bench
+  device: cuda
+  precision: bf16
+
+# benchmark-specific settings consumed only by scripts/benchmark_batch.py.
+# Measurement window = train.num_steps - bench.warmup_steps.
+bench:
+  warmup_steps: 30               # CLI override: --warmup; bump to ≥60 with --compile
+  compile: false                 # CLI override: --compile / --no-compile
+  out_dir: logs/bench
+
+hf:
+  push: false
+
+logging:
+  use_wandb: false               # CLI override: --wandb online
+  project: Lerobot
+  entity: saint-yangyuqi-university-of-z-rich
+  mode: disabled
+  tags: [bench, smolvla]

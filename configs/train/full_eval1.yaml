@@ -5,13 +5,19 @@ experiment_name: eval1_smolvla_v1
 seed: 42
 
 data:
-  # Merged across all 3 recording sessions (19 episodes, 5926 frames).
-  # Re-create with: sbatch scripts/_merge_job.sh OR
-  #   python scripts/merge_datasets.py --src data/raw/eval1_session{1,2,3} --dst data/raw/eval1_merged
+  # Re-merge after every fresh recording session with:
+  #   python scripts/merge_datasets.py --src data/raw/eval1_session* --dst data/raw/eval1_merged
+  # Episode/frame counts are read from meta/info.json at runtime — no hardcoded sizes.
   repo_id: local/eval1_merged
   root: data/raw/eval1_merged
-  episodes: null               # null = use all 19
+  episodes: null               # null = let the val splitter use all episodes
   image_keys: ["main"]
+  # Color-stratified train/val split. Set exactly one of `per_color` (int)
+  # or `fraction` (0..1). `min_train_per_color` aborts the split if any
+  # color would drop below that many training episodes.
+  val:
+    fraction: 0.1
+    min_train_per_color: 3
   augmentations:               # NOT yet wired through (see train.py warning).
     color_jitter: 0.2
     random_crop_pct: 0.95
@@ -24,8 +30,8 @@ model:
   freeze_lm_head: false
 
 train:
-  batch_size: 128
-  grad_accum_steps: 1          # real batch 128 — confirmed fits ~32 GB on A100 80GB
+  batch_size: 128              # bench job 2679976: 14.6 GB w/ compile — huge headroom
+  grad_accum_steps: 1
   num_workers: 4
   num_steps: 20000
   lr: 5.0e-5
@@ -36,6 +42,7 @@ train:
   output_dir: checkpoints/eval1
   device: cuda
   precision: bf16
+  compile: true                # bench job 2701026: +9% samples/s, -20% VRAM, ~5min cold start
 
 # HF Hub push for the final checkpoint. The trainer expands $HF_USER from
 # the environment, so set it in the slurm script (or `export HF_USER=...`
