@@ -478,18 +478,33 @@ def main():
             wandb.finish()
 
     # ---- HF Hub push ----
+    # Default target is best/ (lowest val_loss seen during training). final/
+    # is the post-loop snapshot, which on long runs is overfit; we'd prefer
+    # not to publish that. Fall back to final/ if best/ is missing — happens
+    # for runs without a val split (overfit.yaml/bench.yaml) where best/ is
+    # never written. The user can force this with `hf.upload: final` if they
+    # really want the last-step ckpt instead.
     hf_cfg = cfg.get("hf") or {}
     if hf_cfg.get("push"):
         repo_id_hf = expand_env(hf_cfg["repo_id"])
         private = bool(hf_cfg.get("private", True))
+        upload_pref = str(hf_cfg.get("upload", "best")).lower()
+        best_dir = out_dir / "best"
+        if upload_pref == "final":
+            push_dir, push_kind = final_dir, "final"
+        elif best_dir.exists():
+            push_dir, push_kind = best_dir, "best"
+        else:
+            print("[train] note: no best/ ckpt (likely no val split); pushing final/ instead.")
+            push_dir, push_kind = final_dir, "final"
         from huggingface_hub import HfApi
         api = HfApi()
         try:
             api.create_repo(repo_id=repo_id_hf, private=private, repo_type="model", exist_ok=True)
-            commit_msg = f"upload {cfg['experiment_name']} {run_id}"
-            print(f"[train] uploading to https://huggingface.co/{repo_id_hf} (private={private})")
+            commit_msg = f"upload {cfg['experiment_name']} {run_id} ({push_kind})"
+            print(f"[train] uploading {push_kind}/ to https://huggingface.co/{repo_id_hf} (private={private})")
             api.upload_folder(
-                folder_path=str(final_dir),
+                folder_path=str(push_dir),
                 repo_id=repo_id_hf,
                 repo_type="model",
                 commit_message=commit_msg,
@@ -501,7 +516,7 @@ def main():
             print("  conda activate lerobot")
             print(f"  hf auth login   # PrajnaYang token, WRITE scope")
             print(f"  hf repos create {repo_id_hf} --type model")
-            print(f"  hf upload {repo_id_hf} {final_dir} . --repo-type=model")
+            print(f"  hf upload {repo_id_hf} {push_dir} . --repo-type=model")
             sys.exit(2)
     else:
         print("[train] HF push disabled (cfg.hf.push is false).")

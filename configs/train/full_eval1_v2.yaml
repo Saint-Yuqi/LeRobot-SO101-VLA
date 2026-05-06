@@ -52,8 +52,8 @@ train:
 
 hf:
   push: true
-  repo_id: "${HF_USER}/so101-eval1-smolvla-v2"
-  private: false
+  repo_id: "ethrl2026/so101-eval1-smolvla-v2"
+  private: true              # team org; flip explicitly when ready to publish
 
 logging:
   use_wandb: true

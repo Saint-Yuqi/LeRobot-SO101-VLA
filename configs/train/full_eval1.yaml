@@ -44,14 +44,14 @@ train:
   precision: bf16
   compile: true                # bench job 2701026: +9% samples/s, -20% VRAM, ~5min cold start
 
-# HF Hub push for the final checkpoint. The trainer expands $HF_USER from
-# the environment, so set it in the slurm script (or `export HF_USER=...`
-# before launch). Auth uses ~/.cache/huggingface/token (`hf auth login`, inside the lerobot conda env).
+# HF Hub push of the lowest-val (best) checkpoint. Default target is the
+# team org `ethrl2026` private; teammates need `hf auth login` once with a
+# token that has access to the org. Auth uses ~/.cache/huggingface/token
+# inside the lerobot conda env.
 hf:
   push: true
-  repo_id: "${HF_USER}/so101-eval1-smolvla-v1"
-  # Public so teammates can `hf download` without a token / collaborator dance.
-  private: false
+  repo_id: "ethrl2026/so101-eval1-smolvla-v1"
+  private: true              # team org; flip explicitly when ready to publish
 
 logging:
   use_wandb: true
