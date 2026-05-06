@@ -313,6 +313,11 @@ def main():
         policy.train()
         return sum(losses) / max(1, len(losses))
 
+    # ---- Eval cadence (decoupled from save_every so we can poll val finely
+    # without paying the disk cost of checkpointing every time). Defaults to
+    # save_every for backwards compat with older configs. ----
+    eval_every = int(tcfg.get("eval_every", tcfg["save_every"]))
+
     # ---- Early-stop config (opt-in via cfg.train.early_stop) ----
     # Conservative defaults: only fires after `min_steps` AND only when val
     # has plateaued or risen for `patience` consecutive eval cycles. The
@@ -326,7 +331,8 @@ def main():
     es_min_steps = int(es_cfg.get("min_steps", 5000))
     if es_enabled:
         print(f"[train] early-stop: enabled  patience={es_patience}  "
-              f"min_delta={es_min_delta}  min_steps={es_min_steps}")
+              f"min_delta={es_min_delta}  min_steps={es_min_steps}  "
+              f"eval_every={eval_every}")
     best_val_loss = float("inf")
     best_step = -1
     no_improve_evals = 0
@@ -385,16 +391,23 @@ def main():
                 write_checkpoint_meta(
                     ckpt_dir, wandb_run, cfg, step, _git_sha_str,
                 )
+
+            if step > 0 and step % eval_every == 0:
                 val_loss = run_eval()
                 if val_loss is not None:
                     print(f"[train] step={step:6d}  eval/loss={val_loss:.4f}")
                     if use_wandb:
                         wandb.log({"eval/loss": val_loss}, step=step)
-                    # Track best + early-stop bookkeeping
-                    if val_loss < best_val_loss - es_min_delta:
+                    # "improved" controls whether to refresh the best/ ckpt;
+                    # "significant" (improved by ≥ min_delta) controls whether
+                    # to reset the no-improve counter. Decoupling these means a
+                    # slow trickle of sub-min_delta improvements still saves the
+                    # lowest-val ckpt while patience continues to count down.
+                    improved = val_loss < best_val_loss
+                    significant = val_loss < best_val_loss - es_min_delta
+                    if improved:
                         best_val_loss = val_loss
                         best_step = step
-                        no_improve_evals = 0
                         best_dir = out_dir / "best"
                         policy.save_pretrained(best_dir)
                         preprocessor.save_pretrained(best_dir)
@@ -414,6 +427,8 @@ def main():
                         if use_wandb:
                             wandb.log({"eval/best_loss": val_loss,
                                        "eval/best_step": step}, step=step)
+                    if significant:
+                        no_improve_evals = 0
                     else:
                         no_improve_evals += 1
                         print(f"[train] no-improve evals: {no_improve_evals}/"
