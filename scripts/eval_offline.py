@@ -25,20 +25,26 @@ the recorded distribution; they cannot tell you whether the model actually
 
 Usage
 -----
-    # eval-2 — full battery (uses arrangements for test B)
+    # eval-1 — only A + C (no compositional pool needed)
     python scripts/eval_offline.py \\
-        --checkpoint PrajnaYang/so101-eval2-smolvla-v1 \\
-        --dataset ethrl2026/so101_pickup_20260503_165245_task2 \\
-        --arrangements configs/data/arrangements.json \\
+        --checkpoint ethrl2026/so101-eval1-smolvla-v2 \\
+        --dataset ethrl2026/task1_20260509_prompt_lighting_augmented_360 \\
+        --frames-per-episode 4 \\
+        --out reports/eval1_offline.json
+
+    # eval-2 — A + C on the augmented stage-2 task2 set
+    python scripts/eval_offline.py \\
+        --checkpoint ethrl2026/so101-eval2-smolvla-v1 \\
+        --dataset ethrl2026/task2_20260509_stage2_random_lighting_augmented_2160 \\
         --frames-per-episode 4 \\
         --out reports/eval2_offline.json
 
-    # eval-1 — only A + C (no compositional pool needed)
+    # eval-3 — A + C on task3
     python scripts/eval_offline.py \\
-        --checkpoint PrajnaYang/so101-eval1-smolvla-v2 \\
-        --dataset ethrl2026/so101_pickup_20260503_153511_task1 \\
+        --checkpoint ethrl2026/so101-eval3-smolvla-v1 \\
+        --dataset ethrl2026/so101_pickup_20260509_185350_task3 \\
         --frames-per-episode 4 \\
-        --out reports/eval1_offline.json
+        --out reports/eval3_offline.json
 
 Pass criteria (printed at the end):
   Test A: per-joint MAE < 5° (gripper < 0.5cm) on majority of frames

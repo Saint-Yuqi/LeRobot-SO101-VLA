@@ -5,6 +5,11 @@ Run with: `pytest tests/test_prompt_aug.py -q` inside the lerobot env.
 These tests use a mock base dataset so they don't need any video on disk
 or torch.cuda — they exercise only the wrapper logic (arrangement loading,
 prompt pool construction, sample rewriting, passthrough).
+
+The arrangements file is built fresh per-test via a `tmp_path` fixture so
+the suite stays decoupled from `configs/data/arrangements.json` — that
+production file is now empty after the 20260509 dataset refresh (augmentation
+is baked into the parquet, the wrapper is no longer wired into any config).
 """
 from __future__ import annotations
 
@@ -22,9 +27,31 @@ from src.data.prompt_aug import (
     load_arrangements,
 )
 
-REPO_T1 = "ethrl2026/so101_pickup_20260503_153511_task1"
-REPO_T2 = "ethrl2026/so101_pickup_20260503_165245_task2"
-ARRS = Path(__file__).resolve().parent.parent / "configs/data/arrangements.json"
+# Test-only labels — no relation to any production HF dataset.
+REPO_T1 = "test-fixture/task1_90eps"
+REPO_T2 = "test-fixture/task2_75eps"
+
+
+@pytest.fixture
+def arrangements_path(tmp_path) -> Path:
+    """Write a fixture arrangements.json mirroring the historical task1+task2
+    layout (90 + 75 episodes). Older revisions of these tests read from the
+    real config; that coupling broke when the production file was emptied."""
+    p = tmp_path / "arrangements.json"
+    p.write_text(json.dumps({
+        "_doc": "test fixture",
+        REPO_T1: [
+            {"episode_range": [0, 89], "arrangement": ["blue", "red", "green"]},
+        ],
+        REPO_T2: [
+            {"episode_range": [0, 14],  "arrangement": ["red",   "green", "blue"]},
+            {"episode_range": [15, 29], "arrangement": ["green", "blue",  "red"]},
+            {"episode_range": [30, 44], "arrangement": ["blue",  "green", "red"]},
+            {"episode_range": [45, 59], "arrangement": ["red",   "blue",  "green"]},
+            {"episode_range": [60, 74], "arrangement": ["blue",  "red",   "green"]},
+        ],
+    }))
+    return p
 
 
 class _MockBase(torch.utils.data.Dataset):
@@ -106,9 +133,9 @@ def test_pool_relational_uses_neighbor_color():
 
 # ---------- arrangement loading ----------
 
-def test_load_arrangements_full_coverage():
-    a1 = load_arrangements(ARRS, REPO_T1)
-    a2 = load_arrangements(ARRS, REPO_T2)
+def test_load_arrangements_full_coverage(arrangements_path):
+    a1 = load_arrangements(arrangements_path, REPO_T1)
+    a2 = load_arrangements(arrangements_path, REPO_T2)
     assert len(a1) == 90 and len(a2) == 75
     assert a1[0] == ["blue", "red", "green"]
     assert a1[89] == ["blue", "red", "green"]
@@ -118,15 +145,15 @@ def test_load_arrangements_full_coverage():
     assert a2[60] == ["blue", "red", "green"]
 
 
-def test_load_arrangements_unknown_repo_returns_empty():
-    out = load_arrangements(ARRS, "no-such/dataset")
+def test_load_arrangements_unknown_repo_returns_empty(arrangements_path):
+    out = load_arrangements(arrangements_path, "no-such/dataset")
     assert out == {}
 
 
 # ---------- wrapper behaviour ----------
 
-def test_wrapper_rewrites_in_arrangement_range():
-    arrs = load_arrangements(ARRS, REPO_T2)
+def test_wrapper_rewrites_in_arrangement_range(arrangements_path):
+    arrs = load_arrangements(arrangements_path, REPO_T2)
     base = _MockBase([
         {"episode_index": 0,  "task": "Put the banana in the blue colored bowl."},
         {"episode_index": 5,  "task": "Put the banana in the red colored bowl."},
@@ -142,8 +169,8 @@ def test_wrapper_rewrites_in_arrangement_range():
         assert len(bucket) >= 5  # at least 5 distinct rewrites in 50 draws
 
 
-def test_wrapper_passes_through_unknown_episode():
-    arrs = load_arrangements(ARRS, REPO_T2)
+def test_wrapper_passes_through_unknown_episode(arrangements_path):
+    arrs = load_arrangements(arrangements_path, REPO_T2)
     base = _MockBase([
         {"episode_index": 999, "task": "Put the banana in the red colored bowl."},
     ])
@@ -152,12 +179,12 @@ def test_wrapper_passes_through_unknown_episode():
         assert w[0]["task"] == "Put the banana in the red colored bowl."
 
 
-def test_wrapper_forwards_attributes():
+def test_wrapper_forwards_attributes(arrangements_path):
     class WithExtra(_MockBase):
         @property
         def special(self):
             return "VALUE"
-    arrs = load_arrangements(ARRS, REPO_T2)
+    arrs = load_arrangements(arrangements_path, REPO_T2)
     w = PromptAugmentingDataset(
         WithExtra([{"episode_index": 0, "task": "Put the banana in the blue colored bowl."}]),
         arrs, seed=1,
@@ -165,8 +192,8 @@ def test_wrapper_forwards_attributes():
     assert w.special == "VALUE"
 
 
-def test_wrapper_len_matches_base():
-    arrs = load_arrangements(ARRS, REPO_T2)
+def test_wrapper_len_matches_base(arrangements_path):
+    arrs = load_arrangements(arrangements_path, REPO_T2)
     base = _MockBase([
         {"episode_index": i, "task": "Put the banana in the blue colored bowl."}
         for i in range(75)

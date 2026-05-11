@@ -1,39 +1,22 @@
-# Eval-2 fine-tune: 75 task2 episodes (5 bowl arrangements × 3 colors × 5
-# eps) + 15 carry-over episodes from task1 (5 per color, picked
-# deterministically with seed=42 from the 90-episode task1 set).
-#
-# Recorded prompts in tasks.parquet are direct color labels only. To cover
-# eval-day compositional prompts (ordinal / relational / negation) we
-# rewrite the `task` field at training time using each episode's bowl
-# arrangement (configs/data/arrangements.json). The wrapper in
-# src/data/prompt_aug.py samples uniformly from a 12–16 phrasing pool per
-# (arrangement, target). Val sets are NOT augmented so eval loss stays
-# comparable to the canonical recorded prompt.
+# Eval-2 fine-tune: 2160 task2 episodes (stage-2 random lighting
+# augmentation pre-baked into the parquet — covers all 5 bowl
+# arrangements × 3 target colors with lighting + prompt variation).
+# No carry-over from task1: the augmented dataset already provides enough
+# coverage. No prompt_augment wrapper: augmentation is in the data.
 
 experiment_name: eval2_smolvla_v1
 seed: 42
 
 data:
-  sources:
-    # Primary source — used for normalizer stats. 75 episodes, all 5
-    # bowl arrangements. 10% color-stratified val split (canonical prompt).
-    - repo_id: ethrl2026/so101_pickup_20260503_165245_task2
-      root: null
-      episodes: null
-      val:
-        fraction: 0.1
-        min_train_per_color: 3
-      prompt_augment:
-        arrangements: configs/data/arrangements.json
-    # Carry-over: 15 task1 episodes (5 per color, seed=42 deterministic
-    # pick from the standard blue-red-green left→right arrangement). No
-    # val split held out from this set — generalization aid, not eval target.
-    - repo_id: ethrl2026/so101_pickup_20260503_153511_task1
-      root: null
-      episodes: [10, 14, 19, 22, 26, 41, 44, 45, 46, 53, 60, 73, 74, 81, 84]
-      prompt_augment:
-        arrangements: configs/data/arrangements.json
+  # 90 task2 episodes × 24 augmented copies = 2160 frames-of-episodes.
+  # Pulled from HuggingFace; cached under HF_HOME.
+  repo_id: ethrl2026/task2_20260509_stage2_random_lighting_augmented_2160
+  root: null
+  episodes: null               # null = let the val splitter use all episodes
   image_keys: ["main"]
+  val:
+    fraction: 0.1
+    min_train_per_color: 3
 
 model:
   base: lerobot/smolvla_base
@@ -45,7 +28,7 @@ train:
   batch_size: 128
   grad_accum_steps: 1
   num_workers: 4
-  num_steps: 25000             # +25% over eval1 — task2 is ~12k frames vs ~5.9k
+  num_steps: 25000             # augmented set is ~24× larger; let it see more steps
   lr: 5.0e-5
   weight_decay: 1.0e-5
   warmup_steps: 750
@@ -55,9 +38,8 @@ train:
   output_dir: checkpoints/eval2_v1
   device: cuda
   precision: bf16
-  # Early stopping. Same semantics as eval1; eval2's val is task2 only
-  # (canonical prompt, no augmentation), so val/loss tracks how well the
-  # model fits direct color prompts on the 5 alternative arrangements.
+  # Early stopping. Same semantics as eval1; val/loss tracks fit on the
+  # color-stratified held-out 10% of the augmented set.
   early_stop:
     enabled: true
     patience: 10             # 10×eval_every=5000 step plateau before stopping
@@ -74,4 +56,4 @@ logging:
   project: Lerobot
   entity: saint-yangyuqi-university-of-z-rich
   mode: online
-  tags: [eval2, smolvla, multi-source]
+  tags: [eval2, smolvla, task2-augmented]

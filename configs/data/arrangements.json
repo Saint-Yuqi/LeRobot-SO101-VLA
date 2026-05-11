@@ -1,13 +1,3 @@
 {
-  "_doc": "Per-source bowl arrangements as [left, middle, right] from observer view (camera behind robot). Used by src/data/prompt_aug.py to generate ordinal/relational/negation prompts at training time. Episode ranges are inclusive on both ends.",
-  "ethrl2026/so101_pickup_20260503_153511_task1": [
-    {"episode_range": [0, 89], "arrangement": ["blue", "red", "green"]}
-  ],
-  "ethrl2026/so101_pickup_20260503_165245_task2": [
-    {"episode_range": [0, 14],  "arrangement": ["red",   "green", "blue"]},
-    {"episode_range": [15, 29], "arrangement": ["green", "blue",  "red"]},
-    {"episode_range": [30, 44], "arrangement": ["blue",  "green", "red"]},
-    {"episode_range": [45, 59], "arrangement": ["red",   "blue",  "green"]},
-    {"episode_range": [60, 74], "arrangement": ["blue",  "red",   "green"]}
-  ]
+  "_doc": "Per-source bowl arrangements as [left, middle, right] from observer view (camera behind robot). Used by src/data/prompt_aug.py to generate ordinal/relational/negation prompts at training time. Episode ranges are inclusive on both ends. Empty after the 20260509 dataset refresh: the new augmented HF datasets bake prompt + lighting variation into the parquet, so the PromptAugmentingDataset wrapper is no longer used by the eval{1,2,3} configs. Kept as `{}` (not deleted) so any loader that opens this path still parses clean."
 }

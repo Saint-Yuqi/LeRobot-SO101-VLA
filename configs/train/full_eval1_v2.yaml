@@ -7,9 +7,11 @@ experiment_name: eval1_smolvla_v2
 seed: 42
 
 data:
-  # 90 episodes (30 per color), pulled from HuggingFace on first use.
-  # Auto-cached under HF_HOME (or ~/.cache/huggingface/lerobot if unset).
-  repo_id: ethrl2026/so101_pickup_20260503_153511_task1
+  # 360 episodes — prompt + lighting augmentation pre-baked into the
+  # parquet (4 augmented copies of the 90 original episodes). Pulled from
+  # HuggingFace on first use; cached under HF_HOME.
+  # NOTE: augmentation is in the data, so NO prompt_augment wrapper here.
+  repo_id: ethrl2026/task1_20260509_prompt_lighting_augmented_360
   root: null
   episodes: null               # null = let the val splitter use all episodes
   image_keys: ["main"]
