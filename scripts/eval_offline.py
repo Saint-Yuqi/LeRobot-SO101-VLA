@@ -188,11 +188,17 @@ def predict(wrapper, sample: dict, prompt: str) -> np.ndarray:
 # ---------------------------------------------------------------- tests
 
 
-def test_a_replay(wrapper, samples, action_lo, action_hi):
-    """Predict each sample's chunk, compare with ground truth."""
+def test_a_replay(wrapper, samples, action_lo, action_hi, phase_lookup=None):
+    """Predict each sample's chunk, compare with ground truth.
+
+    `phase_lookup`: optional dict {(episode_index, frame_index): label}
+    where label is 0=pre_grasp / 1=post_grasp. When provided, also reports
+    per-phase MAE (the A/B headline metric). See `src/data/phase_labels.py`.
+    """
     print("\n=== Test A: open-loop replay ===")
     per_joint_mae: list[np.ndarray] = []
     chunk_l2: list[float] = []
+    per_frame_phase: list[int] = []  # only populated when phase_lookup given
     nan_count = 0
     out_of_range = 0
     rng = action_hi - action_lo
@@ -208,6 +214,10 @@ def test_a_replay(wrapper, samples, action_lo, action_hi):
         margin = 0.05 * np.maximum(rng, 1e-6)
         if ((pred < action_lo - margin) | (pred > action_hi + margin)).any():
             out_of_range += 1
+        if phase_lookup is not None:
+            per_frame_phase.append(int(phase_lookup.get(
+                (int(s["episode_index"]), int(s["frame_index"])), 0,
+            )))
     if not per_joint_mae:
         return {"error": "no finite predictions"}
     pjm = np.stack(per_joint_mae)  # (N, action_dim)
@@ -219,6 +229,18 @@ def test_a_replay(wrapper, samples, action_lo, action_hi):
         "per_joint_mae_max": pjm.max(axis=0).tolist(),
         "chunk_rms": _summary(chunk_l2),
     }
+    if phase_lookup is not None and len(per_frame_phase) == pjm.shape[0]:
+        phase_arr = np.asarray(per_frame_phase, dtype=np.int8)
+        mask_pre = phase_arr == 0
+        mask_post = ~mask_pre
+        def _safe_mean(a): return float(a.mean()) if a.size else None
+        def _safe_pj(a): return a.mean(axis=0).tolist() if a.size else []
+        out["n_frames_pregrasp"] = int(mask_pre.sum())
+        out["n_frames_postgrasp"] = int(mask_post.sum())
+        out["mae_pregrasp_anchor"] = _safe_mean(pjm[mask_pre])
+        out["mae_postgrasp_anchor"] = _safe_mean(pjm[mask_post])
+        out["per_joint_mae_pregrasp"] = _safe_pj(pjm[mask_pre])
+        out["per_joint_mae_postgrasp"] = _safe_pj(pjm[mask_post])
     print(f"  samples              : {out['n_samples']}")
     print(f"  NaN predictions      : {out['n_nan']}")
     print(f"  out-of-train-range   : {out['n_out_of_training_range']}")
@@ -227,6 +249,11 @@ def test_a_replay(wrapper, samples, action_lo, action_hi):
     print(f"  chunk RMS  mean={out['chunk_rms']['mean']:.4f}  "
           f"median={out['chunk_rms']['median']:.4f}  "
           f"max={out['chunk_rms']['max']:.4f}")
+    if "mae_pregrasp_anchor" in out:
+        print(f"  mae_pregrasp_anchor  : {out['mae_pregrasp_anchor']:.4f}  "
+              f"(n={out['n_frames_pregrasp']})")
+        print(f"  mae_postgrasp_anchor : {out['mae_postgrasp_anchor']:.4f}  "
+              f"(n={out['n_frames_postgrasp']})")
     return out
 
 
@@ -545,7 +572,30 @@ def main():
         "n_samples": len(samples),
         "elapsed_s_load": time.time() - t0,
     }
-    report["test_a"] = test_a_replay(wrapper, samples, action_lo, action_hi)
+    # Phase-bucket MAE diagnostics. Compute labels over the evaluated
+    # episodes only (cheap — reads action column only). Builds a
+    # (ep, frame) -> label lookup keyed on what's in `samples`.
+    try:
+        from src.data.phase_labels import compute_phase_labels, summarize
+        from huggingface_hub import snapshot_download
+        # LeRobotDataset HF cache uses standard snapshot path.
+        phase_root = Path(snapshot_download(
+            repo_id=args.dataset, repo_type="dataset", revision="v3.0",
+            allow_patterns=["meta/*", "data/**"],
+        ))
+        phase_result = compute_phase_labels(
+            repo_id=args.dataset, root=phase_root, episodes=episodes,
+        )
+        print(f"[eval] phase labels: {summarize(phase_result, label=args.dataset)}")
+        phase_lookup = {
+            (int(e), int(f)): int(l) for e, f, l in zip(
+                phase_result.episode_indices, phase_result.frame_indices, phase_result.labels,
+            )
+        }
+    except Exception as e:
+        print(f"[eval] WARN phase-label compute failed ({e!r}); per-phase MAE will be omitted")
+        phase_lookup = None
+    report["test_a"] = test_a_replay(wrapper, samples, action_lo, action_hi, phase_lookup=phase_lookup)
 
     if args.arrangements:
         from src.data.prompt_aug import load_arrangements
