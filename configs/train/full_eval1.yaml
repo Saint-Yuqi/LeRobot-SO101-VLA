@@ -43,6 +43,13 @@ train:
   device: cuda
   precision: bf16
   compile: true                # bench job 2701026: +9% samples/s, -20% VRAM, ~5min cold start
+  phase_sampling:
+    enabled: true              # phase-weighted sampling ON for A/B; weight_pregrasp=2.0
+    weight_pregrasp: 2.0       # 1.0 = uniform-with-replacement (NOT identical to shuffle=True)
+    open_frac: 0.6             # fraction of (g_max - g_min) above min for "open"
+    close_frac: 0.4            # below this for "closed"
+    min_amplitude: 5.0         # episodes with smaller gripper motion fall back to all-pregrasp
+    post_close_margin: 3       # frames after first close to confirm stability (~100ms @30fps)
 
 # HF Hub push of the lowest-val (best) checkpoint. Default target is the
 # team org `ethrl2026` private; teammates need `hf auth login` once with a

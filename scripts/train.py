@@ -131,7 +131,7 @@ def main():
     delta_timestamps = resolve_delta_timestamps(policy_cfg, ds_meta)
     seed = int(cfg.get("seed", 42))
 
-    def _build_one(src: dict) -> tuple[torch.utils.data.Dataset, torch.utils.data.Dataset | None]:
+    def _build_one(src: dict) -> tuple[torch.utils.data.Dataset, torch.utils.data.Dataset | None, list[int] | None, str, str | None]:
         """Build a (train, val_or_None) pair for one source. The val split is opt-in
         per source via `val` (color-stratified by tasks.parquet). Skipped when the
         source pins `episodes` (single-episode debug or carry-over subsets).
@@ -187,14 +187,18 @@ def main():
                 raise ValueError(f"{s_repo}: no arrangement entries found in {arr_path}")
             train_ds = PromptAugmentingDataset(train_ds, arrs, seed=seed)
             print(f"[train] {s_repo}: prompt_augment ON ({len(arrs)} episodes mapped)")
-        return train_ds, val_ds
+        return train_ds, val_ds, train_eps, s_repo, s_root
 
+    # Per-source train_eps + (repo_id, root) saved so we can build phase labels
+    # against the SAME slice we just handed to the LeRobotDataset.
+    source_specs: list[tuple[list[int] | None, str, str | None]] = []
     if sources:
         train_parts: list[LeRobotDataset] = []
         val_parts: list[LeRobotDataset] = []
         for src in sources:
-            td, vd = _build_one(src)
+            td, vd, t_eps, t_repo, t_root = _build_one(src)
             train_parts.append(td)
+            source_specs.append((t_eps, t_repo, t_root))
             if vd is not None:
                 val_parts.append(vd)
         dataset = train_parts[0] if len(train_parts) == 1 else ConcatDataset(train_parts)
@@ -206,13 +210,66 @@ def main():
             f"train_frames={len(dataset)}  val_frames={len(val_dataset) if val_dataset else 0}"
         )
     else:
-        dataset, val_dataset = _build_one(dcfg)
+        dataset, val_dataset, t_eps, t_repo, t_root = _build_one(dcfg)
+        source_specs.append((t_eps, t_repo, t_root))
         print(f"[train] dataset frames: {len(dataset)}  episodes: {ds_meta.total_episodes}")
+
+    # Optional phase-weighted sampler. Off by default — see plan
+    # flower-vla-smol-vla-flickering-puddle.md. Handles single-source and
+    # ConcatDataset (multi-source) uniformly via per-source label compute.
+    phase_cfg = tcfg.get("phase_sampling") or {}
+    sampler = None
+    if phase_cfg.get("enabled"):
+        from src.data.phase_labels import compute_phase_labels, summarize
+        from src.data.sampler import (
+            make_phase_weighted_sampler, concat_phase_labels,
+            assert_dataset_alignment, assert_concat_alignment,
+        )
+        kwargs = dict(
+            open_frac=float(phase_cfg.get("open_frac", 0.6)),
+            close_frac=float(phase_cfg.get("close_frac", 0.4)),
+            min_amplitude=float(phase_cfg.get("min_amplitude", 5.0)),
+            post_close_margin=int(phase_cfg.get("post_close_margin", 3)),
+        )
+        parts = []
+        for (eps, p_repo, p_root) in source_specs:
+            # SmolVLA path: LeRobotDataset's HF cache is in standard location;
+            # if root is None, resolve via huggingface_hub snapshot path.
+            label_root = Path(p_root) if p_root else None
+            if label_root is None:
+                from huggingface_hub import snapshot_download
+                label_root = Path(snapshot_download(
+                    repo_id=p_repo, repo_type="dataset", revision="v3.0",
+                    allow_patterns=["meta/*", "data/**"],
+                ))
+            part = compute_phase_labels(
+                repo_id=p_repo, root=label_root, episodes=eps, **kwargs,
+            )
+            print(f"[train] phase_sampling: {summarize(part, label=p_repo)}")
+            parts.append(part)
+        if isinstance(dataset, ConcatDataset):
+            phase_labels = concat_phase_labels(parts)
+            assert_concat_alignment(dataset, parts, n_check=16)
+        else:
+            phase_labels = parts[0]
+            assert_dataset_alignment(dataset, phase_labels, n_check=16)
+        if len(phase_labels) != len(dataset):
+            raise RuntimeError(
+                f"phase_sampling: labels length {len(phase_labels)} != dataset length "
+                f"{len(dataset)} — iteration order divergence."
+            )
+        sampler = make_phase_weighted_sampler(
+            phase_labels,
+            weight_pregrasp=float(phase_cfg.get("weight_pregrasp", 2.0)),
+            replacement=bool(phase_cfg.get("replacement", True)),
+            seed=int(cfg.get("seed", 42)),
+        )
 
     loader = DataLoader(
         dataset,
         batch_size=tcfg["batch_size"],
-        shuffle=True,
+        shuffle=(sampler is None),
+        sampler=sampler,
         num_workers=tcfg.get("num_workers", 4),
         drop_last=True,
         pin_memory=True,
