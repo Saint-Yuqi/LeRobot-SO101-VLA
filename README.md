@@ -12,6 +12,7 @@ instructions, and celebrity image targeting.
 - [x] Inference loop runs on robot from checkpoint
 - [x] Eval 1 dataset collected — 19 episodes / 5 926 frames (3 sessions merged)
 - [x] Eval 1 model trained — 20 000 steps, run `20260502-174455_job2668259`, avg-50 loss ≈ 0.027
+- [x] **Phase-weighted sampling** — pre-grasp frames upweighted at train time (see below)
 - [ ] Eval 1 checkpoint pushed to HuggingFace Hub
 - [ ] Eval 2 strategy decided (end-to-end vs decoupled)
 - [ ] Eval 3 strategy decided
@@ -103,6 +104,56 @@ A `final/` directory contains everything `run_inference.py` needs:
 stat tensors. Never share a partial copy — without the processors the
 policy outputs un-normalized actions.
 
+## Phase-weighted sampling (pre-grasp upweighting)
+
+Real-robot rollouts on the three SO-101 pickup tasks consistently fail in the
+**pre-grasp segment** — the model approaches the bowl but the moment of
+contact / first successful gripper closure is unreliable. Once the object is
+in the gripper, lift / place / release usually succeeds.
+
+[scripts/train.py](scripts/train.py) now supports a `WeightedRandomSampler`
+driven by a binary per-frame label (pre_grasp / post_grasp) computed from
+the gripper signal in the action column. Single config knob, no
+loss-function edits.
+
+```yaml
+# configs/train/full_eval*.yaml
+train:
+  phase_sampling:
+    enabled: true              # ← the only switch
+    weight_pregrasp: 2.0       # 1.0 = uniform-with-replacement (still NOT bit-equivalent
+                               # to today's shuffle=True — sampling is with replacement)
+    open_frac: 0.6             # per-episode adaptive: g_min + 0.6 * (g_max - g_min)
+    close_frac: 0.4            # per-episode adaptive: g_min + 0.4 * (g_max - g_min)
+    min_amplitude: 5.0         # skip episodes whose gripper barely moves (raw units)
+    post_close_margin: 3       # frames after first close to confirm stability (~100ms @30fps)
+```
+
+**Default in all 3 production configs: `enabled: true, weight_pregrasp: 2.0`.**
+Setting `enabled: false` reverts to uniform shuffle (bit-identical to before
+this change, modulo `replacement=True` on the with-replacement control case).
+
+Implementation:
+- [src/data/phase_labels.py](src/data/phase_labels.py) — per-episode adaptive
+  open→close detector + NPZ cache + `PhaseLabelResult` dataclass with
+  alignment fields.
+- [src/data/sampler.py](src/data/sampler.py) — `make_phase_weighted_sampler()`
+  factory, `concat_phase_labels()` for ConcatDataset multi-source, runtime
+  `assert_dataset_alignment()` / `assert_concat_alignment()` that catch any
+  iteration-order divergence at startup.
+
+Detector defaults were validated on all three task datasets in
+[scripts/spikes/probe_phase_detector.py](scripts/spikes/probe_phase_detector.py).
+Absolute gripper thresholds break on eval3 (78% miss); per-episode adaptive
+thresholds work on all three (eval1 0% / eval2 0% / eval3 11% failed-close,
+with `pregrasp_frac` ≈ 0.63–0.66 across tasks).
+
+Per-phase MAE breakdown is also reported by
+[scripts/eval_offline.py](scripts/eval_offline.py):
+`mae_pregrasp_anchor`, `mae_postgrasp_anchor`, and per-joint variants.
+This is the metric to track A/B against — does upweighting pre-grasp narrow
+`mae_pregrasp_anchor` without inflating `mae_postgrasp_anchor`?
+
 ## Re-training Eval 1 from scratch
 
 The merged dataset has to exist first (one-time, then sits on the
@@ -129,10 +180,14 @@ sbatch scripts/train.slurm configs/train/full_eval1.yaml scripts/train.py
 - `src/` — All logic. Importable, testable.
   - `models/base_vla.py` — the `BaseVLA` interface every policy implements.
   - `models/smolvla_wrapper.py` — end-to-end SmolVLA implementation.
+  - `data/phase_labels.py` + `data/sampler.py` — phase-weighted sampling
+    (pre-grasp upweighting, used by `train.py`).
 - `scripts/` — Thin entry points. Parse args, call into `src/`.
   - `train.py` — full fine-tune (eval 1+).
   - `overfit_test.py` — single-episode sanity check.
   - `run_inference.py` — closed-loop on the real robot.
+  - `eval_offline.py` — offline action-MAE eval (also reports per-phase
+    MAE: `mae_pregrasp_anchor`, `mae_postgrasp_anchor`).
   - `merge_datasets.py` — concatenate teleop sessions into one LeRobot dataset.
   - `cast_checkpoint_bf16.py` — halve checkpoint size for sharing.
   - `repair_checkpoint_processors.py` — rebuild missing pre/postprocessor

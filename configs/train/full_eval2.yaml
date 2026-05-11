@@ -45,6 +45,13 @@ train:
     patience: 10             # 10×eval_every=5000 step plateau before stopping
     min_delta: 0.005
     min_steps: 5000
+  phase_sampling:
+    enabled: true              # phase-weighted sampling ON for A/B; weight_pregrasp=2.0
+    weight_pregrasp: 2.0       # 1.0 = uniform-with-replacement (NOT identical to shuffle=True)
+    open_frac: 0.6             # fraction of (g_max - g_min) above min for "open"
+    close_frac: 0.4            # below this for "closed"
+    min_amplitude: 5.0         # episodes with smaller gripper motion fall back to all-pregrasp
+    post_close_margin: 3       # frames after first close to confirm stability (~100ms @30fps)
 
 hf:
   push: true
