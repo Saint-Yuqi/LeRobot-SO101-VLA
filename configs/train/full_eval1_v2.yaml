@@ -56,7 +56,7 @@ train:
     min_delta: 0.005         # ~3% of typical val/loss; below this is noise
     min_steps: 5000          # don't fire during early/transient phase
   phase_sampling:
-    enabled: true              # phase-weighted sampling ON for A/B; weight_pregrasp=2.0
+    enabled: false             # OFF for A/B baseline; flip to true for the phase-sampled arm
     weight_pregrasp: 2.0       # 1.0 = uniform-with-replacement (NOT identical to shuffle=True)
     open_frac: 0.6             # fraction of (g_max - g_min) above min for "open"
     close_frac: 0.4            # below this for "closed"
