@@ -28,7 +28,7 @@ Usage
     # eval-1 — only A + C (no compositional pool needed)
     python scripts/eval_offline.py \\
         --checkpoint ethrl2026/so101-eval1-smolvla-v2 \\
-        --dataset ethrl2026/task1_20260509_prompt_lighting_augmented_360 \\
+        --dataset ethrl2026/task1_20260509_plus \\
         --frames-per-episode 4 \\
         --out reports/eval1_offline.json
 

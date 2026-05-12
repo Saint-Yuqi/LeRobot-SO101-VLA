@@ -30,7 +30,7 @@ except ImportError:
 import argparse
 
 DATASETS = [
-    ("eval1", "ethrl2026/task1_20260509_prompt_lighting_augmented_360"),
+    ("eval1", "ethrl2026/task1_20260509_plus"),
     ("eval2", "ethrl2026/task2_20260509_stage2_random_lighting_augmented_2160"),
     ("eval3", "ethrl2026/so101_pickup_20260509_185350_task3"),
 ]
