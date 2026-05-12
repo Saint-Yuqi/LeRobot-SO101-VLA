@@ -12,7 +12,8 @@ instructions, and celebrity image targeting.
 - [x] Inference loop runs on robot from checkpoint
 - [x] Eval 1 dataset collected — 19 episodes / 5 926 frames (3 sessions merged)
 - [x] Eval 1 model trained — 20 000 steps, run `20260502-174455_job2668259`, avg-50 loss ≈ 0.027
-- [x] **Phase-weighted sampling** — pre-grasp frames upweighted at train time (see below)
+- [x] **Phase-weighted sampling** — upweights pre-grasp frames
+- [x] **FlowerVLA split out** to a sibling repo at `/home/yuqyan/Yuqi/Lerobot_flower` (separate stack, Python 3.10 / Florence-2)
 - [ ] Eval 1 checkpoint pushed to HuggingFace Hub
 - [ ] Eval 2 strategy decided (end-to-end vs decoupled)
 - [ ] Eval 3 strategy decided
@@ -104,6 +105,20 @@ A `final/` directory contains everything `run_inference.py` needs:
 stat tensors. Never share a partial copy — without the processors the
 policy outputs un-normalized actions.
 
+## FlowerVLA — sibling repo
+
+FlowerVLA (Florence-2-base + DiT, Python 3.10 / transformers 4.46) used to
+live in this repo behind a `_flower` suffix. It now lives in its own
+repo at `/home/yuqyan/Yuqi/Lerobot_flower` (`flower` conda env) and
+mirrors this repo's training architecture — same YAML config schema,
+same task1/2/3 split, same phase-weighted sampling, same rollout
+telemetry. The two stacks share HF dataset snapshots (Lerobot_flower's
+configs point back to `/shares/feldmann.ics.mnf.uzh/Yuqi/Lerobot/data/hf/`
+by absolute path).
+
+When working on FlowerVLA: `cd /home/yuqyan/Yuqi/Lerobot_flower && conda activate flower`.
+When working on SmolVLA (this repo): `conda activate lerobot`.
+
 ## Phase-weighted sampling (pre-grasp upweighting)
 
 Real-robot rollouts on the three SO-101 pickup tasks consistently fail in the
@@ -111,10 +126,11 @@ Real-robot rollouts on the three SO-101 pickup tasks consistently fail in the
 contact / first successful gripper closure is unreliable. Once the object is
 in the gripper, lift / place / release usually succeeds.
 
-[scripts/train.py](scripts/train.py) now supports a `WeightedRandomSampler`
+[scripts/train.py](scripts/train.py) supports a `WeightedRandomSampler`
 driven by a binary per-frame label (pre_grasp / post_grasp) computed from
 the gripper signal in the action column. Single config knob, no
-loss-function edits.
+loss-function edits. The FlowerVLA sibling repo carries the same
+implementation symmetrically.
 
 ```yaml
 # configs/train/full_eval*.yaml
@@ -123,36 +139,37 @@ train:
     enabled: true              # ← the only switch
     weight_pregrasp: 2.0       # 1.0 = uniform-with-replacement (still NOT bit-equivalent
                                # to today's shuffle=True — sampling is with replacement)
-    open_frac: 0.6             # per-episode adaptive: g_min + 0.6 * (g_max - g_min)
-    close_frac: 0.4            # per-episode adaptive: g_min + 0.4 * (g_max - g_min)
+    open_frac: 0.6             # per-episode adaptive threshold: g_min + 0.6 * (g_max - g_min)
+    close_frac: 0.4            # per-episode adaptive threshold: g_min + 0.4 * (g_max - g_min)
     min_amplitude: 5.0         # skip episodes whose gripper barely moves (raw units)
     post_close_margin: 3       # frames after first close to confirm stability (~100ms @30fps)
 ```
 
-**Default in all 3 production configs: `enabled: true, weight_pregrasp: 2.0`.**
+**Default in all 6 production configs: `enabled: true, weight_pregrasp: 2.0`.**
 Setting `enabled: false` reverts to uniform shuffle (bit-identical to before
-this change, modulo `replacement=True` on the with-replacement control case).
+the phase-sampling commit, modulo `replacement=True` on the with-replacement
+control case).
 
 Implementation:
 - [src/data/phase_labels.py](src/data/phase_labels.py) — per-episode adaptive
   open→close detector + NPZ cache + `PhaseLabelResult` dataclass with
   alignment fields.
-- [src/data/sampler.py](src/data/sampler.py) — `make_phase_weighted_sampler()`
-  factory, `concat_phase_labels()` for ConcatDataset multi-source, runtime
-  `assert_dataset_alignment()` / `assert_concat_alignment()` that catch any
-  iteration-order divergence at startup.
+- [src/data/sampler.py](src/data/sampler.py) —
+  `make_phase_weighted_sampler()` factory, `concat_phase_labels()` for
+  ConcatDataset multi-source, runtime `assert_dataset_alignment()` /
+  `assert_concat_alignment()`.
 
 Detector defaults were validated on all three task datasets in
-[scripts/spikes/probe_phase_detector.py](scripts/spikes/probe_phase_detector.py).
-Absolute gripper thresholds break on eval3 (78% miss); per-episode adaptive
-thresholds work on all three (eval1 0% / eval2 0% / eval3 11% failed-close,
-with `pregrasp_frac` ≈ 0.63–0.66 across tasks).
+[scripts/spikes/probe_phase_detector.py](scripts/spikes/probe_phase_detector.py)
+— absolute gripper thresholds break on eval3 (78% miss), per-episode
+adaptive thresholds work on all three (eval1 0% / eval2 0% / eval3 11%
+failed-close, with `pregrasp_frac` ≈ 0.63–0.66 across tasks).
 
 Per-phase MAE breakdown is also reported by
 [scripts/eval_offline.py](scripts/eval_offline.py):
 `mae_pregrasp_anchor`, `mae_postgrasp_anchor`, and per-joint variants.
-This is the metric to track A/B against — does upweighting pre-grasp narrow
-`mae_pregrasp_anchor` without inflating `mae_postgrasp_anchor`?
+This is the metric to track A/B against (does upweighting pre-grasp narrow
+`mae_pregrasp_anchor` without inflating `mae_postgrasp_anchor`?).
 
 ## Re-training Eval 1 from scratch
 
@@ -180,10 +197,9 @@ sbatch scripts/train.slurm configs/train/full_eval1.yaml scripts/train.py
 - `src/` — All logic. Importable, testable.
   - `models/base_vla.py` — the `BaseVLA` interface every policy implements.
   - `models/smolvla_wrapper.py` — end-to-end SmolVLA implementation.
-  - `data/phase_labels.py` + `data/sampler.py` — phase-weighted sampling
-    (pre-grasp upweighting, used by `train.py`).
+  - `data/phase_labels.py` + `data/sampler.py` — phase-weighted sampling.
 - `scripts/` — Thin entry points. Parse args, call into `src/`.
-  - `train.py` — full fine-tune (eval 1+).
+  - `train.py` — full fine-tune.
   - `overfit_test.py` — single-episode sanity check.
   - `run_inference.py` — closed-loop on the real robot.
   - `eval_offline.py` — offline action-MAE eval (also reports per-phase
@@ -192,6 +208,7 @@ sbatch scripts/train.slurm configs/train/full_eval1.yaml scripts/train.py
   - `cast_checkpoint_bf16.py` — halve checkpoint size for sharing.
   - `repair_checkpoint_processors.py` — rebuild missing pre/postprocessor
     files for old checkpoints saved before we started persisting them.
+  - `spikes/` — throwaway investigation scripts.
 - `data/raw/` — Untouched teleop recordings (gitignored).
 - `data/processed/` — LeRobot-format datasets ready for training (gitignored).
 - `checkpoints/` — All training outputs (gitignored).
