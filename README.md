@@ -12,8 +12,8 @@ instructions, and celebrity image targeting.
 - [x] Inference loop runs on robot from checkpoint
 - [x] Eval 1 dataset collected — 19 episodes / 5 926 frames (3 sessions merged)
 - [x] Eval 1 model trained — 20 000 steps, run `20260502-174455_job2668259`, avg-50 loss ≈ 0.027
-- [x] **FlowerVLA training pipeline added** as a parallel backbone (see "Two backbones" below)
-- [x] **Phase-weighted sampling** for SmolVLA + FlowerVLA — upweights pre-grasp frames
+- [x] **Phase-weighted sampling** — upweights pre-grasp frames
+- [x] **FlowerVLA split out** to a sibling repo at `/home/yuqyan/Yuqi/Lerobot_flower` (separate stack, Python 3.10 / Florence-2)
 - [ ] Eval 1 checkpoint pushed to HuggingFace Hub
 - [ ] Eval 2 strategy decided (end-to-end vs decoupled)
 - [ ] Eval 3 strategy decided
@@ -105,41 +105,19 @@ A `final/` directory contains everything `run_inference.py` needs:
 stat tensors. Never share a partial copy — without the processors the
 policy outputs un-normalized actions.
 
-## Two backbones: SmolVLA and FlowerVLA
+## FlowerVLA — sibling repo
 
-We now train two model families in parallel and pick per-eval.
+FlowerVLA (Florence-2-base + DiT, Python 3.10 / transformers 4.46) used to
+live in this repo behind a `_flower` suffix. It now lives in its own
+repo at `/home/yuqyan/Yuqi/Lerobot_flower` (`flower` conda env) and
+mirrors this repo's training architecture — same YAML config schema,
+same task1/2/3 split, same phase-weighted sampling, same rollout
+telemetry. The two stacks share HF dataset snapshots (Lerobot_flower's
+configs point back to `/shares/feldmann.ics.mnf.uzh/Yuqi/Lerobot/data/hf/`
+by absolute path).
 
-| | SmolVLA | FlowerVLA |
-|---|---|---|
-| backbone | SmolVLA-base (vendored via `lerobot[smolvla]`) | Florence-2-base + DiT (vendored at `third_party/flower_vla/`) |
-| conda env | `lerobot` (Python 3.12) | `flower` (Python 3.10, torch 2.2.2, transformers 4.46) |
-| train script | [scripts/train.py](scripts/train.py) | [scripts/train_flower.py](scripts/train_flower.py) |
-| overfit smoke | [scripts/overfit_test.py](scripts/overfit_test.py) | [scripts/overfit_flower.py](scripts/overfit_flower.py) |
-| offline eval | [scripts/eval_offline.py](scripts/eval_offline.py) | [scripts/eval_offline_flower.py](scripts/eval_offline_flower.py) |
-| inference | [scripts/run_inference.py](scripts/run_inference.py) | [scripts/run_inference_flower.py](scripts/run_inference_flower.py) |
-| slurm | `scripts/train.slurm` | [scripts/train_flower.slurm](scripts/train_flower.slurm) |
-| configs | `configs/train/full_eval{1,2,3}.yaml` | `configs/train/full_eval{1,2,3}_flower.yaml` |
-
-The two stacks share datasets (LeRobotDataset v3.0 parquet + mp4) and
-normalization stats. FlowerVLA-side dataset loading is in
-[src/flower/dataset.py](src/flower/dataset.py) — reads parquet + decodes mp4 directly,
-no `lerobot` import on the flower env. Vendored upstream code lives at
-[third_party/flower_vla/](third_party/flower_vla/) (see its README for local
-patches F1–F5) and [third_party/lerobot_hw/](third_party/lerobot_hw/) (robot
-hardware drivers, copied so the flower env can run the real robot without
-installing `lerobot`).
-
-### Launching FlowerVLA training
-
-```bash
-# Local smoke (200 steps, single episode) — overfit_flower.yaml is the baseline
-# regression check; overfit_flower_phase.yaml flips the phase sampler on.
-/shares/feldmann.ics.mnf.uzh/Yuqi/conda/envs/flower/bin/python \
-    scripts/overfit_flower.py --config configs/train/overfit_flower.yaml
-
-# Full eval-1 fine-tune, via slurm.
-sbatch scripts/train_flower.slurm configs/train/full_eval1_flower.yaml
-```
+When working on FlowerVLA: `cd /home/yuqyan/Yuqi/Lerobot_flower && conda activate flower`.
+When working on SmolVLA (this repo): `conda activate lerobot`.
 
 ## Phase-weighted sampling (pre-grasp upweighting)
 
@@ -148,14 +126,14 @@ Real-robot rollouts on the three SO-101 pickup tasks consistently fail in the
 contact / first successful gripper closure is unreliable. Once the object is
 in the gripper, lift / place / release usually succeeds.
 
-Both [scripts/train.py](scripts/train.py) (SmolVLA) and
-[scripts/train_flower.py](scripts/train_flower.py) (FlowerVLA) now support a
-`WeightedRandomSampler` driven by a binary per-frame label (pre_grasp /
-post_grasp) computed from the gripper signal in the action column. Single
-config knob, symmetric across both backbones. No loss-function edits.
+[scripts/train.py](scripts/train.py) supports a `WeightedRandomSampler`
+driven by a binary per-frame label (pre_grasp / post_grasp) computed from
+the gripper signal in the action column. Single config knob, no
+loss-function edits. The FlowerVLA sibling repo carries the same
+implementation symmetrically.
 
 ```yaml
-# configs/train/full_eval*.yaml (and *_flower.yaml — same block both sides)
+# configs/train/full_eval*.yaml
 train:
   phase_sampling:
     enabled: true              # ← the only switch
@@ -188,8 +166,7 @@ adaptive thresholds work on all three (eval1 0% / eval2 0% / eval3 11%
 failed-close, with `pregrasp_frac` ≈ 0.63–0.66 across tasks).
 
 Per-phase MAE breakdown is also reported by
-[scripts/eval_offline.py](scripts/eval_offline.py) and
-[scripts/eval_offline_flower.py](scripts/eval_offline_flower.py):
+[scripts/eval_offline.py](scripts/eval_offline.py):
 `mae_pregrasp_anchor`, `mae_postgrasp_anchor`, and per-joint variants.
 This is the metric to track A/B against (does upweighting pre-grasp narrow
 `mae_pregrasp_anchor` without inflating `mae_postgrasp_anchor`?).
@@ -220,26 +197,18 @@ sbatch scripts/train.slurm configs/train/full_eval1.yaml scripts/train.py
 - `src/` — All logic. Importable, testable.
   - `models/base_vla.py` — the `BaseVLA` interface every policy implements.
   - `models/smolvla_wrapper.py` — end-to-end SmolVLA implementation.
-  - `flower/` — FlowerVLA wrapper stack (dataset, normalizer, policy,
-    robot runner). Runs only inside the `flower` conda env.
-  - `data/phase_labels.py` + `data/sampler.py` — phase-weighted sampling
-    (shared by both training scripts).
+  - `data/phase_labels.py` + `data/sampler.py` — phase-weighted sampling.
 - `scripts/` — Thin entry points. Parse args, call into `src/`.
-  - `train.py` / `train_flower.py` — full fine-tune (SmolVLA / FlowerVLA).
-  - `overfit_test.py` / `overfit_flower.py` — single-episode sanity check.
-  - `run_inference.py` / `run_inference_flower.py` — closed-loop on the real robot.
-  - `eval_offline.py` / `eval_offline_flower.py` — offline action-MAE eval
-    (now also reports per-phase MAE: `mae_pregrasp_anchor`, `mae_postgrasp_anchor`).
+  - `train.py` — full fine-tune.
+  - `overfit_test.py` — single-episode sanity check.
+  - `run_inference.py` — closed-loop on the real robot.
+  - `eval_offline.py` — offline action-MAE eval (also reports per-phase
+    MAE: `mae_pregrasp_anchor`, `mae_postgrasp_anchor`).
   - `merge_datasets.py` — concatenate teleop sessions into one LeRobot dataset.
   - `cast_checkpoint_bf16.py` — halve checkpoint size for sharing.
   - `repair_checkpoint_processors.py` — rebuild missing pre/postprocessor
     files for old checkpoints saved before we started persisting them.
-  - `spikes/` — throwaway investigation scripts (probe_phase_detector,
-    verify_vendored).
-- `third_party/` — Vendored upstream code, *not* installed via pip.
-  - `flower_vla/` — FlowerVLA model (with local patches F1–F5; see its README).
-  - `lerobot_hw/` — robot hardware drivers, copied so the `flower` env can
-    run the real robot without depending on `lerobot`.
+  - `spikes/` — throwaway investigation scripts.
 - `data/raw/` — Untouched teleop recordings (gitignored).
 - `data/processed/` — LeRobot-format datasets ready for training (gitignored).
 - `checkpoints/` — All training outputs (gitignored).
