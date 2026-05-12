@@ -9,9 +9,13 @@ seed: 42
 
 data:
   # 90 task2 episodes × 24 augmented copies = 2160 frames-of-episodes.
-  # Pulled from HuggingFace; cached under HF_HOME.
+  # Pre-downloaded snapshot (shared with full_eval2_flower.yaml) to avoid HF 429
+  # when lerobot's force_cache_sync path would otherwise pull all 4326 files.
+  # Populate once with: huggingface-cli download --repo-type dataset --revision v3.0 \
+  #   ethrl2026/task2_20260509_stage2_random_lighting_augmented_2160 \
+  #   --local-dir data/hf/task2_20260509_stage2_random_lighting_augmented_2160
   repo_id: ethrl2026/task2_20260509_stage2_random_lighting_augmented_2160
-  root: null
+  root: data/hf/task2_20260509_stage2_random_lighting_augmented_2160
   episodes: null               # null = let the val splitter use all episodes
   image_keys: ["main"]
   val:

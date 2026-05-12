@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing as mp
 import os
 import sys
 import time
@@ -165,15 +166,21 @@ def main():
         # `try_load`'s except clause does NOT catch (only FileNotFoundError /
         # NotADirectoryError). Forcing a cache sync skips that broken path
         # and goes straight to selective hub fetch, which is idempotent.
+        #
+        # Caveat: lerobot 0.5.1's force_cache_sync path unconditionally calls
+        # `list_repo_refs(repo_id)` on the Hub (dataset_metadata.py:104-115),
+        # which 404s for sentinel ids like "local/eval1_merged". For those we
+        # have to disable the workaround and accept the try_load risk.
+        _is_hub_repo = "/" in s_repo and not s_repo.startswith("local/")
         train_ds: torch.utils.data.Dataset = LeRobotDataset(
             repo_id=s_repo, root=s_root, episodes=train_eps,
-            delta_timestamps=delta_timestamps, force_cache_sync=True,
+            delta_timestamps=delta_timestamps, force_cache_sync=_is_hub_repo,
         )
         val_ds: torch.utils.data.Dataset | None = None
         if val_eps:
             val_ds = LeRobotDataset(
                 repo_id=s_repo, root=s_root, episodes=val_eps,
-                delta_timestamps=delta_timestamps, force_cache_sync=True,
+                delta_timestamps=delta_timestamps, force_cache_sync=_is_hub_repo,
             )
 
         aug = src.get("prompt_augment")
@@ -265,21 +272,29 @@ def main():
             seed=int(cfg.get("seed", 42)),
         )
 
+    # Spawn context for DataLoader workers: torchcodec's AV1 decoder + libdav1d
+    # threads inherit broken state across fork(), surfacing as
+    # "Could not push packet to decoder: Invalid data found when processing input"
+    # part-way through iteration. Spawn re-imports cleanly in each worker.
+    mp_ctx = mp.get_context("spawn")
+
+    n_workers = int(tcfg.get("num_workers", 4))
     loader = DataLoader(
         dataset,
         batch_size=tcfg["batch_size"],
         shuffle=(sampler is None),
         sampler=sampler,
-        num_workers=tcfg.get("num_workers", 4),
+        num_workers=n_workers,
         drop_last=True,
         pin_memory=True,
-        persistent_workers=tcfg.get("num_workers", 4) > 0,
+        persistent_workers=n_workers > 0,
+        multiprocessing_context=mp_ctx if n_workers > 0 else None,
     )
 
     val_loader = None
     if val_dataset is not None:
         # Cap val workers — a few are plenty for a small set, leaves CPUs for train.
-        val_workers = min(2, int(tcfg.get("num_workers", 4)))
+        val_workers = min(2, n_workers)
         val_loader = DataLoader(
             val_dataset,
             batch_size=tcfg["batch_size"],
@@ -288,6 +303,7 @@ def main():
             drop_last=False,
             pin_memory=True,
             persistent_workers=val_workers > 0,
+            multiprocessing_context=mp_ctx if val_workers > 0 else None,
         )
         print(f"[train] val frames: {len(val_dataset)}  batches: {len(val_loader)}")
 

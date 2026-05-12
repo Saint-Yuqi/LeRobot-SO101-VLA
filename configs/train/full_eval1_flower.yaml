@@ -6,7 +6,11 @@ seed: 42
 
 data:
   repo_id: ethrl2026/task1_20260509_prompt_lighting_augmented_360
-  root: null
+  # Pre-downloaded snapshot to avoid HF Hub 429s when eval1/eval2 launch concurrently.
+  # Populate once with: huggingface-cli download --repo-type dataset --revision v3.0 \
+  #   ethrl2026/task1_20260509_prompt_lighting_augmented_360 \
+  #   --local-dir data/hf/task1_20260509_prompt_lighting_augmented_360
+  root: data/hf/task1_20260509_prompt_lighting_augmented_360
   episodes: null
   video_key: observation.images.main
   val:

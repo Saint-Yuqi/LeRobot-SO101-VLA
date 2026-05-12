@@ -6,7 +6,11 @@ seed: 42
 
 data:
   repo_id: ethrl2026/task2_20260509_stage2_random_lighting_augmented_2160
-  root: null
+  # Pre-downloaded snapshot to avoid HF Hub 429s when eval1/eval2 launch concurrently.
+  # Populate once with: huggingface-cli download --repo-type dataset --revision v3.0 \
+  #   ethrl2026/task2_20260509_stage2_random_lighting_augmented_2160 \
+  #   --local-dir data/hf/task2_20260509_stage2_random_lighting_augmented_2160
+  root: data/hf/task2_20260509_stage2_random_lighting_augmented_2160
   episodes: null
   video_key: observation.images.main
   val:

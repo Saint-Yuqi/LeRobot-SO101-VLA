@@ -8,11 +8,15 @@ seed: 42
 
 data:
   # 360 episodes — prompt + lighting augmentation pre-baked into the
-  # parquet (4 augmented copies of the 90 original episodes). Pulled from
-  # HuggingFace on first use; cached under HF_HOME.
+  # parquet (4 augmented copies of the 90 original episodes).
+  # Pre-downloaded snapshot (shared with full_eval1_flower.yaml) to avoid HF 429
+  # when lerobot's force_cache_sync path would otherwise re-pull all 726 files.
+  # Populate once with: huggingface-cli download --repo-type dataset --revision v3.0 \
+  #   ethrl2026/task1_20260509_prompt_lighting_augmented_360 \
+  #   --local-dir data/hf/task1_20260509_prompt_lighting_augmented_360
   # NOTE: augmentation is in the data, so NO prompt_augment wrapper here.
   repo_id: ethrl2026/task1_20260509_prompt_lighting_augmented_360
-  root: null
+  root: data/hf/task1_20260509_prompt_lighting_augmented_360
   episodes: null               # null = let the val splitter use all episodes
   image_keys: ["main"]
   val:
@@ -51,6 +55,13 @@ train:
     patience: 10             # 10×eval_every=5000 step plateau before stopping
     min_delta: 0.005         # ~3% of typical val/loss; below this is noise
     min_steps: 5000          # don't fire during early/transient phase
+  phase_sampling:
+    enabled: true              # phase-weighted sampling ON for A/B; weight_pregrasp=2.0
+    weight_pregrasp: 2.0       # 1.0 = uniform-with-replacement (NOT identical to shuffle=True)
+    open_frac: 0.6             # fraction of (g_max - g_min) above min for "open"
+    close_frac: 0.4            # below this for "closed"
+    min_amplitude: 5.0         # episodes with smaller gripper motion fall back to all-pregrasp
+    post_close_margin: 3       # frames after first close to confirm stability (~100ms @30fps)
 
 hf:
   push: true
