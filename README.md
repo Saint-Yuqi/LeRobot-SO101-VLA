@@ -173,6 +173,97 @@ export HF_USER=PrajnaYang     # so cfg.hf.repo_id expands correctly
 sbatch scripts/train.slurm configs/train/full_eval1.yaml scripts/train.py
 ```
 
+## pi0 fine-tune (task1 / task2)
+
+Two recipes for the `lerobot/pi0` base (PaliGemma VLM + Gemma 300M action expert):
+
+- **task1** — full fine-tune of the action expert only (PaliGemma frozen).
+  Config: `configs/train/pi0_task1.yaml`. Saves full policy weights.
+- **task2** — openpi-aligned LoRA on both LLMs (PaliGemma + action expert),
+  SigLIP frozen, projection MLPs full-FT via `modules_to_save`.
+  Config: `configs/train/pi0_task2.yaml`. Saves a PEFT adapter only.
+
+### Extra install (pi0)
+
+`peft` is **not** pulled by `lerobot[smolvla]`. Install it explicitly before
+training task2 or running inference on a task2 checkpoint:
+
+```bash
+pip install "peft>=0.18,<1.0"
+# or, equivalently, pull lerobot's peft extra:
+# pip install "lerobot[peft] @ git+https://github.com/huggingface/lerobot.git@v0.5.1"
+```
+
+Task1 needs nothing beyond the current `pip install -e .` — `lerobot[smolvla]`
+already pulls a transformers new enough for PaliGemma / pi0.
+
+### Train
+
+```bash
+sbatch scripts/train.slurm configs/train/pi0_task1.yaml scripts/train.py
+sbatch scripts/train.slurm configs/train/pi0_task2.yaml scripts/train.py
+```
+
+`scripts/train.py` dispatches on `model.family` / `model.base`: pi0 → `PI0Config`,
+otherwise → `SmolVLAConfig`. When `model.use_peft: true` (task2) the trainer
+wraps the policy with a fresh LoRA adapter after `make_policy` (openpi recipe;
+see comment in `train.py` near `wrap_with_peft`).
+
+### Inference — `scripts/run_inference_real.py`
+
+`run_inference_real.py` is the closed-loop runner for the modern lerobot API
+(`lerobot.robots.so101_follower`). It works for **SmolVLA, pi0 task1, and pi0
+task2** — the script auto-detects the checkpoint layout:
+
+- If the checkpoint dir contains `adapter_config.json` → load `lerobot/pi0`
+  base, then attach the LoRA adapter (task2 path).
+- Otherwise → load directly via `policy_cls.from_pretrained` (SmolVLA + pi0
+  task1 path; behaviour unchanged from before).
+
+```bash
+# SmolVLA eval1 (unchanged behaviour)
+python scripts/run_inference_real.py \
+    --checkpoint ethrl2026/so101-eval1-smolvla-v1 \
+    --prompt "Put the banana in the blue colored bowl." \
+    --max-seconds 20
+
+# pi0 task1 — full action-expert fine-tune (loads like a normal checkpoint)
+python scripts/run_inference_real.py \
+    --checkpoint ethrl2026/so101-pi0-task1 \
+    --prompt "Put the banana in the blue colored bowl." \
+    --max-seconds 20
+
+# pi0 task2 — LoRA adapter (base + adapter merged at load time)
+python scripts/run_inference_real.py \
+    --checkpoint ethrl2026/so101-eval2-pi0-lora-v1 \
+    --prompt "Put the banana in the blue colored bowl." \
+    --max-seconds 20
+
+# Dry run (no robot) — useful for verifying a checkpoint downloads + loads.
+python scripts/run_inference_real.py \
+    --checkpoint ethrl2026/so101-eval2-pi0-lora-v1 \
+    --prompt "..." --max-seconds 5 --dry-run
+```
+
+Flags worth knowing (full list: `--help`):
+
+| flag | default | what it does |
+|---|---|---|
+| `--checkpoint` | required | Local ckpt dir, HF repo id, or PEFT adapter dir. |
+| `--prompt` | required | Task instruction. |
+| `--max-seconds` | `20.0` | Hard rollout time cap. |
+| `--device` | `mps` | `cuda` for the cluster, `mps` for Apple, `cpu` fallback. |
+| `--control-hz` | `30.0` | Control loop rate. |
+| `--robot-port` / `--robot-id` | — | SO-101 serial port + calibration id. |
+| `--camera-key` / `--camera-index` | `main` / `0` | OpenCV camera selection. |
+| `--dry-run` | off | Synthetic robot — no hardware needed, prints actions. |
+| `--display-data` | off | Stream obs + actions to a rerun viewer. |
+| `--log-dir` / `--no-log` | `logs/inference` | Per-rollout dossier (meta.json, steps.csv, optional frames/). |
+
+Each rollout writes `logs/inference/<timestamp>_<ckpt>/` with `meta.json`,
+`steps.csv`, `outcome.json`, and (every `--frame-every` steps) JPEGs under
+`frames/` — enough to debug a failed rollout after the fact.
+
 ## Repository layout
 
 - `configs/` — YAML configs for every experiment. **Never hardcode

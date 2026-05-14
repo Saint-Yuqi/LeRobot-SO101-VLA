@@ -1,0 +1,86 @@
+# Task 2 (Eval 2): pi0 LoRA finetune — openpi-aligned recipe.
+#
+# Equivalent to openpi's `gemma_2b_lora + gemma_300m_lora` low-mem config:
+#   * PaliGemma Gemma 2B (llm_0) base frozen, LoRA adapters trainable.
+#   * Action expert Gemma 300M (llm_1) base frozen, LoRA adapters trainable.
+#   * SigLIP vision tower frozen (not in LoRA target nor modules_to_save).
+#   * Vision projector + action/state/time projections full-FT via modules_to_save.
+#
+# LoRA is wired in scripts/train.py via policy.wrap_with_peft() AFTER make_policy
+# (lerobot's factory `use_peft=True` path is for loading existing adapters, not
+# wrapping fresh base weights — we bypass it).
+
+experiment_name: pi0_task2_lora
+seed: 42
+
+data:
+  # 90 task2 episodes × 24 augmented copies = 2160 episodes.
+  # Lighting + prompt variation pre-baked in parquet (5 arrangements × 3 colors).
+  repo_id: ethrl2026/task2_20260509_stage2_random_lighting_augmented_2160
+  root: null                       # not pre-downloaded; LeRobot pulls into HF_HOME
+  episodes: null
+  image_keys: ["main"]
+  val:
+    fraction: 0.1
+    min_train_per_color: 3
+
+model:
+  family: pi0
+  base: lerobot/pi0
+  chunk_size: 50
+  freeze_vision_encoder: true       # SigLIP frozen (also enforced via LoRA modules_to_save exclusion)
+  train_expert_only: false          # both LLMs LoRA — let action expert adapters train too
+  use_peft: true                    # → train.py wraps policy with LoRA after make_policy
+  gradient_checkpointing: true
+  lora:
+    r: 16                           # openpi pi0 LoRA default
+    alpha: 32                       # 2× rank, openpi default
+    dropout: 0.05
+    # Defaults below match openpi's get_freeze_filter() semantics; uncomment to override.
+    # target_modules: ".*(paligemma\\.model\\.language_model|gemma_expert\\.model)\\..*\\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)"
+    # modules_to_save: [multi_modal_projector, state_proj, action_in_proj, action_out_proj, action_time_mlp_in, action_time_mlp_out]
+
+train:
+  batch_size: 32
+  grad_accum_steps: 4               # effective batch 128 (same target, fewer accum steps)
+  num_workers: 8
+  num_steps: 30000                  # openpi pi0_libero default; ~12 ckpts at save_every=2500
+  lr: 2.5e-5                        # openpi pi0 LoRA peak lr
+  weight_decay: 1.0e-5
+  warmup_steps: 1000
+  log_every: 50
+  save_every: 2500                  # 12 retained ckpts → post-hoc best-by-rollout selection
+  eval_every: 1000                  # val/loss tracking, not used for stopping
+  # NOTE: early_stop intentionally disabled. val_loss is not a reliable proxy
+  # for compositional-prompt rollout success rate (the actual metric). Run to
+  # num_steps, keep all 2500-step ckpts, pick best post-hoc by real eval. The
+  # train loop still copies the lowest-val_loss ckpt to best/ as a default pick.
+  early_stop:
+    enabled: false
+    patience: 8
+    min_delta: 0.002
+    min_steps: 8000
+  phase_sampling:
+    enabled: true
+    weight_pregrasp: 2.0
+    open_frac: 0.6
+    close_frac: 0.4
+    min_amplitude: 5.0
+    post_close_margin: 3
+  output_dir: checkpoints/pi0_task2
+  device: cuda
+  precision: bf16
+  compile: false
+
+hf:
+  push: true
+  repo_id: "ethrl2026/so101-eval2-pi0-lora-v1"
+  private: true
+
+logging:
+  use_wandb: true
+  project: LeRobot-SO101-VLA
+  entity: jiayisun02-eth-z-rich
+  mode: online
+  name: pi0_task2_lora_v1
+  tags: [pi0, eval2, lora, openpi-recipe, task2-augmented]

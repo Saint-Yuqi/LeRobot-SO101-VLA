@@ -18,6 +18,7 @@ Or via slurm:
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_right
 import json
 import os
 import sys
@@ -39,6 +40,100 @@ def expand_env(s):
     if isinstance(s, str):
         return os.path.expandvars(s)
     return s
+
+
+def _safe_list(x):
+    """Best-effort conversion for tensors/arrays/sequences used in dataset metadata."""
+    if x is None:
+        return None
+    if hasattr(x, "tolist"):
+        try:
+            return x.tolist()
+        except Exception:
+            pass
+    try:
+        return list(x)
+    except Exception:
+        return None
+
+
+def _unwrap_dataset_chain(dataset):
+    """Walk through common wrapper attributes so debug logs reach the base dataset."""
+    chain = []
+    seen = set()
+    cur = dataset
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        chain.append(cur)
+        nxt = getattr(cur, "dataset", None)
+        if nxt is None:
+            nxt = getattr(cur, "base", None)
+        cur = nxt
+    return chain
+
+
+def _debug_context_for_index(dataset, idx: int) -> dict[str, object]:
+    """Gather enough metadata to pinpoint a bad sample / episode on decode failures."""
+    ctx: dict[str, object] = {
+        "dataset_idx": idx,
+        "dataset_chain": [type(ds).__name__ for ds in _unwrap_dataset_chain(dataset)],
+    }
+    for ds in _unwrap_dataset_chain(dataset):
+        repo_id = getattr(ds, "repo_id", None)
+        root = getattr(ds, "root", None)
+        if repo_id is not None and "repo_id" not in ctx:
+            ctx["repo_id"] = repo_id
+        if root is not None and "root" not in ctx:
+            ctx["root"] = str(root)
+
+        epi = getattr(ds, "episode_data_index", None)
+        if not isinstance(epi, dict):
+            continue
+        starts = _safe_list(epi.get("from"))
+        ends = _safe_list(epi.get("to"))
+        if not starts or not ends or len(starts) != len(ends):
+            continue
+
+        ep_idx = bisect_right(starts, idx) - 1
+        if ep_idx < 0 or ep_idx >= len(ends) or idx >= ends[ep_idx]:
+            continue
+
+        ctx["episode_index"] = ep_idx
+        ctx["episode_start_idx"] = starts[ep_idx]
+        ctx["episode_end_idx_exclusive"] = ends[ep_idx]
+        ctx["episode_frame_offset"] = idx - starts[ep_idx]
+
+        selected_eps = _safe_list(getattr(ds, "episodes", None))
+        if selected_eps and ep_idx < len(selected_eps):
+            ctx["source_episode_id"] = selected_eps[ep_idx]
+        break
+    return ctx
+
+
+class DebugDatasetWrapper:
+    """Wrap a dataset so DataLoader worker crashes include the failing sample context."""
+
+    def __init__(self, dataset, *, label: str):
+        self.dataset = dataset
+        self.label = label
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getattr__(self, name):
+        return getattr(self.dataset, name)
+
+    def __getitem__(self, idx):
+        try:
+            return self.dataset[idx]
+        except Exception as exc:
+            ctx = _debug_context_for_index(self.dataset, int(idx))
+            ctx["label"] = self.label
+            details = ", ".join(f"{k}={v!r}" for k, v in ctx.items())
+            raise RuntimeError(
+                "Dataset sample fetch failed; likely a corrupt video shard or decode issue. "
+                f"Context: {details}"
+            ) from exc
 
 
 def main():
@@ -88,7 +183,6 @@ def main():
     from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
     from lerobot.datasets.factory import resolve_delta_timestamps
     from lerobot.policies.factory import make_policy, make_pre_post_processors
-    from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
 
     torch.manual_seed(cfg["seed"])
     # TF32 matmul: ~3-5% free on A100 fp32 paths (bf16 already main path).
@@ -119,19 +213,41 @@ def main():
     ds_meta = LeRobotDatasetMetadata(repo_id=repo_id, root=root)
 
     # ---- Policy config ----
-    policy_cfg = SmolVLAConfig(
-        pretrained_path=mcfg["base"],
-        chunk_size=mcfg["chunk_size"],
-        n_action_steps=mcfg["chunk_size"],
-        device=tcfg["device"],
-        freeze_vision_encoder=mcfg["freeze_vision_encoder"],
-    )
+    # Dispatch on `model.base`: pi0 family → PI0Config, otherwise → SmolVLAConfig.
+    model_family = (mcfg.get("family") or "").lower()
+    base_str = str(mcfg["base"]).lower()
+    if model_family == "pi0" or "pi0" in base_str:
+        from lerobot.policies.pi0.configuration_pi0 import PI0Config
+        # NOTE on use_peft: lerobot's factory interprets PI0Config.use_peft=True as
+        # "load a saved PEFT adapter from pretrained_path", which would fail when
+        # pretrained_path is a base model (e.g. lerobot/pi0). We always pass False
+        # to the factory; if `model.use_peft` is set in yaml, we wrap the policy
+        # with a fresh LoRA adapter AFTER make_policy below (openpi-style recipe).
+        policy_cfg = PI0Config(
+            pretrained_path=mcfg["base"],
+            chunk_size=mcfg["chunk_size"],
+            n_action_steps=mcfg["chunk_size"],
+            device=tcfg["device"],
+            freeze_vision_encoder=mcfg.get("freeze_vision_encoder", True),
+            train_expert_only=mcfg.get("train_expert_only", False),
+            use_peft=False,
+            gradient_checkpointing=mcfg.get("gradient_checkpointing", False),
+        )
+    else:
+        from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
+        policy_cfg = SmolVLAConfig(
+            pretrained_path=mcfg["base"],
+            chunk_size=mcfg["chunk_size"],
+            n_action_steps=mcfg["chunk_size"],
+            device=tcfg["device"],
+            freeze_vision_encoder=mcfg["freeze_vision_encoder"],
+        )
 
     # ---- Dataset ----
     delta_timestamps = resolve_delta_timestamps(policy_cfg, ds_meta)
     seed = int(cfg.get("seed", 42))
 
-    def _build_one(src: dict) -> tuple[torch.utils.data.Dataset, torch.utils.data.Dataset | None, list[int] | None, str, str | None]:
+    def _build_one(src: dict) -> tuple[torch.utils.data.Dataset, torch.utils.data.Dataset | None]:
         """Build a (train, val_or_None) pair for one source. The val split is opt-in
         per source via `val` (color-stratified by tasks.parquet). Skipped when the
         source pins `episodes` (single-episode debug or carry-over subsets).
@@ -187,18 +303,17 @@ def main():
                 raise ValueError(f"{s_repo}: no arrangement entries found in {arr_path}")
             train_ds = PromptAugmentingDataset(train_ds, arrs, seed=seed)
             print(f"[train] {s_repo}: prompt_augment ON ({len(arrs)} episodes mapped)")
-        return train_ds, val_ds, train_eps, s_repo, s_root
+        train_ds = DebugDatasetWrapper(train_ds, label=f"train:{s_repo}")
+        if val_ds is not None:
+            val_ds = DebugDatasetWrapper(val_ds, label=f"val:{s_repo}")
+        return train_ds, val_ds
 
-    # Per-source train_eps + (repo_id, root) saved so we can build phase labels
-    # against the SAME slice we just handed to the LeRobotDataset.
-    source_specs: list[tuple[list[int] | None, str, str | None]] = []
     if sources:
         train_parts: list[LeRobotDataset] = []
         val_parts: list[LeRobotDataset] = []
         for src in sources:
-            td, vd, t_eps, t_repo, t_root = _build_one(src)
+            td, vd = _build_one(src)
             train_parts.append(td)
-            source_specs.append((t_eps, t_repo, t_root))
             if vd is not None:
                 val_parts.append(vd)
         dataset = train_parts[0] if len(train_parts) == 1 else ConcatDataset(train_parts)
@@ -210,66 +325,13 @@ def main():
             f"train_frames={len(dataset)}  val_frames={len(val_dataset) if val_dataset else 0}"
         )
     else:
-        dataset, val_dataset, t_eps, t_repo, t_root = _build_one(dcfg)
-        source_specs.append((t_eps, t_repo, t_root))
+        dataset, val_dataset = _build_one(dcfg)
         print(f"[train] dataset frames: {len(dataset)}  episodes: {ds_meta.total_episodes}")
-
-    # Optional phase-weighted sampler. Off by default — see plan
-    # flower-vla-smol-vla-flickering-puddle.md. Handles single-source and
-    # ConcatDataset (multi-source) uniformly via per-source label compute.
-    phase_cfg = tcfg.get("phase_sampling") or {}
-    sampler = None
-    if phase_cfg.get("enabled"):
-        from src.data.phase_labels import compute_phase_labels, summarize
-        from src.data.sampler import (
-            make_phase_weighted_sampler, concat_phase_labels,
-            assert_dataset_alignment, assert_concat_alignment,
-        )
-        kwargs = dict(
-            open_frac=float(phase_cfg.get("open_frac", 0.6)),
-            close_frac=float(phase_cfg.get("close_frac", 0.4)),
-            min_amplitude=float(phase_cfg.get("min_amplitude", 5.0)),
-            post_close_margin=int(phase_cfg.get("post_close_margin", 3)),
-        )
-        parts = []
-        for (eps, p_repo, p_root) in source_specs:
-            # SmolVLA path: LeRobotDataset's HF cache is in standard location;
-            # if root is None, resolve via huggingface_hub snapshot path.
-            label_root = Path(p_root) if p_root else None
-            if label_root is None:
-                from huggingface_hub import snapshot_download
-                label_root = Path(snapshot_download(
-                    repo_id=p_repo, repo_type="dataset", revision="v3.0",
-                    allow_patterns=["meta/*", "data/**"],
-                ))
-            part = compute_phase_labels(
-                repo_id=p_repo, root=label_root, episodes=eps, **kwargs,
-            )
-            print(f"[train] phase_sampling: {summarize(part, label=p_repo)}")
-            parts.append(part)
-        if isinstance(dataset, ConcatDataset):
-            phase_labels = concat_phase_labels(parts)
-            assert_concat_alignment(dataset, parts, n_check=16)
-        else:
-            phase_labels = parts[0]
-            assert_dataset_alignment(dataset, phase_labels, n_check=16)
-        if len(phase_labels) != len(dataset):
-            raise RuntimeError(
-                f"phase_sampling: labels length {len(phase_labels)} != dataset length "
-                f"{len(dataset)} — iteration order divergence."
-            )
-        sampler = make_phase_weighted_sampler(
-            phase_labels,
-            weight_pregrasp=float(phase_cfg.get("weight_pregrasp", 2.0)),
-            replacement=bool(phase_cfg.get("replacement", True)),
-            seed=int(cfg.get("seed", 42)),
-        )
 
     loader = DataLoader(
         dataset,
         batch_size=tcfg["batch_size"],
-        shuffle=(sampler is None),
-        sampler=sampler,
+        shuffle=True,
         num_workers=tcfg.get("num_workers", 4),
         drop_last=True,
         pin_memory=True,
@@ -293,8 +355,49 @@ def main():
 
     # ---- Policy + processors ----
     policy = make_policy(cfg=policy_cfg, ds_meta=ds_meta)
+
+    # ---- LoRA wrap (openpi-aligned pi0 LoRA recipe) ----
+    # Matches openpi's `gemma_2b_lora + gemma_300m_lora` mode:
+    #   - PaliGemma Gemma base (llm_0) frozen, LoRA adapters trainable
+    #   - Action expert Gemma base (llm_1) frozen, LoRA adapters trainable
+    #   - SigLIP vision_tower stays frozen (not in target_modules nor modules_to_save)
+    #   - Vision projector + action projections full-FT via modules_to_save
+    # See openpi src/openpi/models/pi0_config.py:135-161 (get_freeze_filter).
+    if (model_family == "pi0" or "pi0" in base_str) and mcfg.get("use_peft"):
+        from peft import LoraConfig
+        lora_cfg_yaml = mcfg.get("lora") or {}
+        target_modules = lora_cfg_yaml.get(
+            "target_modules",
+            r".*(paligemma\.model\.language_model|gemma_expert\.model)\..*\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)",
+        )
+        modules_to_save = lora_cfg_yaml.get(
+            "modules_to_save",
+            [
+                "multi_modal_projector",
+                "state_proj",
+                "action_in_proj",
+                "action_out_proj",
+                "action_time_mlp_in",
+                "action_time_mlp_out",
+            ],
+        )
+        lora_cfg = LoraConfig(
+            r=int(lora_cfg_yaml.get("r", 16)),
+            lora_alpha=int(lora_cfg_yaml.get("alpha", 32)),
+            lora_dropout=float(lora_cfg_yaml.get("dropout", 0.05)),
+            bias="none",
+            target_modules=target_modules,
+            modules_to_save=modules_to_save,
+        )
+        print(f"[train] wrapping pi0 with LoRA (r={lora_cfg.r} alpha={lora_cfg.lora_alpha} "
+              f"dropout={lora_cfg.lora_dropout})")
+        policy = policy.wrap_with_peft(peft_config=lora_cfg)
+
     policy.train()
-    print(f"[train] params: {sum(p.numel() for p in policy.parameters()):,}")
+    total_params = sum(p.numel() for p in policy.parameters())
+    trainable_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
+    print(f"[train] params: {total_params:,}  trainable: {trainable_params:,} "
+          f"({100 * trainable_params / max(1, total_params):.2f}%)")
 
     # Optional torch.compile. Bench (job 2701026) shows +9% samples/s and
     # -20% VRAM at the cost of ~5 min cold-start; SmolVLA's flow-matching
@@ -304,6 +407,8 @@ def main():
         print("[train] torch.compile enabled (mode=default) — first step will be slow")
         policy = torch.compile(policy)
 
+    # Use policy_cfg (PI0Config / SmolVLAConfig) directly: after wrap_with_peft
+    # the live `policy.config` becomes a LoraConfig, losing input_features etc.
     preprocessor, postprocessor = make_pre_post_processors(
         policy_cfg=policy_cfg,
         pretrained_path=mcfg["base"],
@@ -312,22 +417,22 @@ def main():
             "device_processor": {"device": tcfg["device"]},
             "normalizer_processor": {
                 "stats": ds_meta.stats,
-                "features": {**policy.config.input_features, **policy.config.output_features},
-                "norm_map": policy.config.normalization_mapping,
+                "features": {**policy_cfg.input_features, **policy_cfg.output_features},
+                "norm_map": policy_cfg.normalization_mapping,
             },
         },
         postprocessor_overrides={
             "unnormalizer_processor": {
                 "stats": ds_meta.stats,
-                "features": policy.config.output_features,
-                "norm_map": policy.config.normalization_mapping,
+                "features": policy_cfg.output_features,
+                "norm_map": policy_cfg.normalization_mapping,
             },
         },
     )
 
     # ---- Optim + LR schedule ----
     optim = torch.optim.AdamW(
-        policy.parameters(),
+        [p for p in policy.parameters() if p.requires_grad],
         lr=tcfg["lr"],
         weight_decay=tcfg["weight_decay"],
         fused=torch.cuda.is_available(),
