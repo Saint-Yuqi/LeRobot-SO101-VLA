@@ -61,6 +61,29 @@ The first run prints `[infer] cached at <path>` so you can see exactly
 where the ~1.2 GB landed. By default that's `~/.cache/huggingface/hub/`.
 Set `HF_HOME=<somewhere>` before running if you need it elsewhere.
 
+### Inferring FlowerVLA (Florence-2) checkpoints
+
+Same robot, different backbone. The FlowerVLA stack lives in the sibling
+`Lerobot_flower/` repo and needs its own conda env (`flower`, Python 3.10
++ torch 2.2.2 + transformers 4.46). The `lerobot` env above **cannot**
+load FlowerVLA checkpoints — see
+[`docs/inference_flower_setup.md`](docs/inference_flower_setup.md) for
+the install path, the reason `lerobot` can't be reused, and full usage.
+
+TL;DR once `flower` is set up and `Lerobot_flower` is cloned next to this
+repo:
+
+```bash
+conda activate flower
+python scripts/run_inference_real_flower.py \
+    --checkpoint ethrl2026/so101-eval1-flower-v100x8-all \
+    --prompt "Put the banana in the blue colored bowl." \
+    --max-seconds 20
+```
+
+Same CLI shape as `run_inference_real.py`; task1 and task2 differ only
+in `--checkpoint` and `--prompt`.
+
 ### Common flags
 
 | flag | default | what it does |
